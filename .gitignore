@@ -1,0 +1,10 @@
+tmp/
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+node_modules/
+~$*.docx
+.DS_Store
+output/pdf/*.pdf
+doc/配电终端统一运维技术方案20260413.docx
