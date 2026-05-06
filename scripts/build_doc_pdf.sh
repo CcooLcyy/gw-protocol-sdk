@@ -4,8 +4,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+DOC_ROOT="${REPO_ROOT}/doc"
 
-DEFAULT_INPUT="${REPO_ROOT}/doc/104_101动态库接口设计.md"
+DEFAULT_INPUT="${DOC_ROOT}/api/dtu_unified_maintenance_sdk_api_design.md"
 INPUT_PATH="${1:-${DEFAULT_INPUT}}"
 
 if [[ ! -f "${INPUT_PATH}" ]]; then
@@ -15,10 +16,10 @@ fi
 
 INPUT_ABS="$(cd "$(dirname "${INPUT_PATH}")" && pwd)/$(basename "${INPUT_PATH}")"
 DOC_BASENAME="$(basename "${INPUT_ABS}" .md)"
-OUTPUT_PATH="${2:-${REPO_ROOT}/output/pdf/${DOC_BASENAME}.pdf}"
+OUTPUT_PATH="${2:-${DOC_ROOT}/generated/${DOC_BASENAME}.pdf}"
 OUTPUT_ABS="$(mkdir -p "$(dirname "${OUTPUT_PATH}")" && cd "$(dirname "${OUTPUT_PATH}")" && pwd)/$(basename "${OUTPUT_PATH}")"
 
-BUILD_DIR="${REPO_ROOT}/tmp/build_pdf/${DOC_BASENAME}"
+BUILD_DIR="${DOC_ROOT}/tmp/build_pdf/${DOC_BASENAME}"
 RENDERED_MD="${BUILD_DIR}/${DOC_BASENAME}.with-diagrams.md"
 HTML_PATH="${BUILD_DIR}/${DOC_BASENAME}.html"
 BASE_PDF="${BUILD_DIR}/${DOC_BASENAME}.base.pdf"
@@ -80,4 +81,3 @@ else
 fi
 
 echo "generated: ${OUTPUT_ABS}"
-

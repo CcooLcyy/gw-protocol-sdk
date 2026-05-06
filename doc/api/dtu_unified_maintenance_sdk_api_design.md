@@ -1,8 +1,10 @@
-# 104/101 Linux 动态库接口设计
+# 配电终端统一运维工具协议层 SDK 接口设计
 
 ## 1. 文档目的
 
-本文档定义一个面向 Linux `.so` 发布的 `IEC 60870-5-101` / `IEC 60870-5-104` 动态库接口草案，用于项目内部评审、接口冻结和后续实现对齐。
+本文档定义 `dtu-unified-maintenance-sdk` 的 `IEC 60870-5-101` / `IEC 60870-5-104` 协议层动态库接口草案，用于接口冻结、实现对齐和跨平台交付。
+
+目标动态库产物包括 Windows `.dll`、Linux `.so` 和 Android `.so`。
 
 本文档聚焦主站侧能力，采用以下设计原则：
 
@@ -11,20 +13,22 @@
 - 公共对象模型固定为单会话句柄，内部状态机实现由库内部维护。
 - 对外 ABI 使用 C ABI，便于 C/C++ 及其他语言绑定。
 - 数据接口以高层点表对象为主，同时保留原始 ASDU 旁路能力。
-- 参数读取、批量写入、回读校验、定值区切换等统一运维能力通过独立参数接口承载。
+- 参数读取、批量写入、回读校验、定值区切换、文件目录召唤、文件读写和断点续传等统一运维能力通过独立高层接口承载。
 - 错误处理采用同步返回码 + 异步事件回调组合模型。
 
 ## 2. 适用范围
 
-本文档当前聚焦主站侧 101/104 Linux 动态库接口，覆盖以下能力：
+本文档当前聚焦主站侧 101/104 跨平台协议层动态库接口及 101 运维扩展能力，覆盖以下能力：
 
 - 101 主站会话创建、启动、停止、销毁。
 - 104 主站会话创建、启动、停止、销毁。
+- 运维101 profile 建模与标准 101 共享同一套会话生命周期和扩展配置骨架。
 - 点表上送事件建模，包括单点、双点、遥测、累计量等常见对象。
 - 参数读取、批量写入、回读校验、定值区管理和终端自描述获取。
+- 文件目录召唤、文件读取、文件写入、状态查询、取消和断点续传。
 - 遥控、总召、电度量召唤、时钟同步等主站侧典型操作。
 - 原始 ASDU 观察和透传发送能力。
-- 链路状态、异常、日志、命令结果、参数结果等异步事件回调。
+- 链路状态、异常、日志、命令结果、参数结果、文件目录结果和文件传输结果等异步事件回调。
 
 ## 3. API 总览
 
@@ -32,13 +36,15 @@
 
 - 公共 API 负责生命周期、运行控制、点表事件、命令、旁路和统一错误语义。
 - 101/104 差异只放在各自扩展配置中，不把串口细节或 TCP 细节泄漏到公共接口。
+- 运维101 作为 `IEC_PROTOCOL_101` 下的 profile 承载，不新增第三种公共协议枚举。
+- 文件目录、文件读写和断点续传保持公共 `iec_` API 命名，不把运维101专用报文细节暴露给上层。
 - 公共结构体保持轻量字段布局，沿用项目既有接入习惯，不引入额外版本握手字段。
 - 所有回调都在 `iec_create` 阶段注册，由库内工作线程触发。
 - 参数模板导入导出和界面生成由上层应用负责，动态库负责参数对象建模和协议交互。
 
 ### 3.2 核心函数总表
 
-以下核心函数均为公共 API，统一适用于 101/104。
+以下核心函数均为公共 API，统一适用于 101/104；当目标协议 profile 或终端能力不支持某项运维能力时，动态库应返回明确的 `IEC_STATUS_UNSUPPORTED` 或异步结果码。
 
 | API | 用途 | 关键输入 | 同步返回含义 | 关联异步结果 |
 | --- | --- | --- | --- | --- |
@@ -59,6 +65,11 @@
 | `iec_write_parameters` | 批量写入参数 | 参数写入请求结构体 | 请求是否被接受并生成请求 ID | `on_parameter_result` |
 | `iec_verify_parameters` | 按期望值回读校验参数 | 参数校验请求结构体 | 请求是否被接受并生成请求 ID | `on_parameter_result`、`on_parameter_indication` |
 | `iec_switch_setting_group` | 查询或切换定值区 | 定值区请求结构体 | 请求是否被接受并生成请求 ID | `on_parameter_result` |
+| `iec_list_files` | 召唤远端文件目录 | 文件目录请求结构体 | 请求是否被接受并生成请求 ID | `on_file_list_indication`、`on_file_operation_result` |
+| `iec_read_file` | 读取远端文件，支持按偏移续传 | 文件读取请求结构体 | 请求是否被接受并生成传输 ID | `on_file_data_indication`、`on_file_operation_result` |
+| `iec_write_file` | 写入远端文件，支持按偏移续传 | 文件写入请求结构体 | 请求是否被接受并生成传输 ID | `on_file_operation_result` |
+| `iec_get_file_transfer_status` | 查询文件传输本地状态快照 | 传输 ID | 是否成功写出当前状态视图 | 无 |
+| `iec_cancel_file_transfer` | 请求取消进行中的文件传输 | 传输 ID | 取消请求是否被接受 | `on_file_operation_result` |
 | `iec_clock_sync` | 发送校时命令 | 校时请求结构体 | 请求是否被接受 | `on_link_event`、日志回调 |
 | `iec_send_raw_asdu` | 主动透传原始 ASDU | 原始发送请求结构体 | 请求是否被接受 | `on_raw_asdu`、`on_link_event` |
 
@@ -71,6 +82,9 @@
 | `on_point_indication` | 收到高层点表对象时 | 接收单点、双点、遥测、累计量等对象 | 由库内工作线程触发 |
 | `on_command_result` | 命令收到确认、否认或超时时 | 获取命令最终结果 | 由库内工作线程触发 |
 | `on_device_description` | 收到终端自描述内容时 | 接收 XML 或 msg 自描述文件并供上层解析 | 由库内工作线程触发 |
+| `on_file_list_indication` | 收到文件目录分帧结果时 | 接收目录项并构建远端文件视图 | 由库内工作线程触发 |
+| `on_file_data_indication` | 收到文件读取数据块时 | 接收文件块、推进偏移并支撑断点续传 | 由库内工作线程触发 |
+| `on_file_operation_result` | 文件目录、文件读写或取消完成时 | 获取文件类请求的最终结果 | 由库内工作线程触发 |
 | `on_parameter_indication` | 收到参数读取结果时 | 接收参数值和可选参数描述信息 | 由库内工作线程触发 |
 | `on_parameter_result` | 参数写入、校验、切区完成时 | 获取参数类请求的最终结果 | 由库内工作线程触发 |
 | `on_raw_asdu` | 启用旁路且收发原始 ASDU 时 | 调试抓包、特殊报文透传 | 由库内工作线程触发 |
@@ -81,7 +95,7 @@
 | 结构体 | 作用 | 关键字段 |
 | --- | --- | --- |
 | `iec_session_config_t` | 公共配置 | `protocol`、超时、重连间隔、日志等级、`user_context` |
-| `iec_callbacks_t` | 回调集合 | 状态、链路、点表、命令、自描述、参数、原始 ASDU、日志回调 |
+| `iec_callbacks_t` | 回调集合 | 状态、链路、点表、命令、自描述、文件目录、文件数据、文件结果、参数、原始 ASDU、日志回调 |
 | `iec_point_address_t` | 协议原生地址 | 公共地址、信息体地址、类型标识、传送原因 |
 | `iec_point_value_t` | 高层点值 | 点值类型、质量位、时间戳、实际数据 |
 | `iec_command_request_t` | 控制命令 | 目标地址、命令类型、命令模式、命令值 |
@@ -90,8 +104,16 @@
 | `iec_parameter_read_request_t` | 参数读取请求 | 读取模式、参数域、地址范围、定值区 |
 | `iec_parameter_write_request_t` | 参数写入请求 | 参数数组、目标定值区、写后校验开关 |
 | `iec_device_description_t` | 自描述内容事件 | 格式、内容视图、分片完成标记 |
+| `iec_file_list_request_t` | 文件目录请求 | 目录名、是否附带详情 |
+| `iec_file_entry_t` | 单个目录项 | 文件名、文件大小、时间戳、校验摘要 |
+| `iec_file_list_indication_t` | 文件目录结果 | 目录项数组、数量、结束标记 |
+| `iec_file_read_request_t` | 文件读取请求 | 目录名、文件名、起始偏移、块大小 |
+| `iec_file_write_request_t` | 文件写入请求 | 文件名、总大小、起始偏移、待发送内容 |
+| `iec_file_data_indication_t` | 文件数据块事件 | 当前偏移、下一偏移、数据块视图 |
+| `iec_file_transfer_status_t` | 文件传输状态快照 | 传输方向、状态、已确认偏移、是否可续传、最近一次底层错误信息 |
+| `iec_file_operation_result_t` | 文件操作结果 | 操作类型、结果码、最终偏移、总大小、协议诊断细节 |
 | `iec_raw_asdu_event_t` | 原始报文事件 | 收发方向、类型标识、公共地址、载荷视图 |
-| `iec101_master_config_t` | 101 扩展配置 | 串口、链路地址、字段长度、重发参数 |
+| `iec101_master_config_t` | 101 扩展配置 | profile、串口、链路地址、字段长度、重发参数 |
 | `iec104_master_config_t` | 104 扩展配置 | 远端地址、端口、连接模式、K/W/T 参数 |
 
 ### 3.5 对外句柄与头文件骨架
@@ -112,6 +134,8 @@ typedef struct iec_session iec_session_t;
 ## 4. 公共 API 详细定义
 
 ### 4.1 会话管理与运行控制
+
+#### iec_create
 
 ```c
 /**
@@ -148,7 +172,11 @@ iec_status_t iec_create(
     const void *protocol_config,
     const iec_callbacks_t *callbacks,
     iec_session_t **out_session);
+```
 
+#### iec_destroy
+
+```c
 /**
  * @brief 销毁会话对象。
  *
@@ -164,7 +192,11 @@ iec_status_t iec_create(
  * @note 停止流程由 `iec_stop` 承担，本函数仅负责资源释放。
  */
 iec_status_t iec_destroy(iec_session_t *session);
+```
 
+#### iec_get_protocol
+
+```c
 /**
  * @brief 查询当前会话的协议类型。
  *
@@ -178,7 +210,11 @@ iec_status_t iec_destroy(iec_session_t *session);
 iec_status_t iec_get_protocol(
     const iec_session_t *session,
     iec_protocol_t *out_protocol);
+```
 
+#### iec_get_status
+
+```c
 /**
  * @brief 查询当前运行状态。
  *
@@ -191,7 +227,11 @@ iec_status_t iec_get_protocol(
 iec_status_t iec_get_status(
     const iec_session_t *session,
     iec_runtime_state_t *out_state);
+```
 
+#### iec_set_option
+
+```c
 /**
  * @brief 修改运行时可变选项。
  *
@@ -211,7 +251,11 @@ iec_status_t iec_set_option(
     iec_option_t option,
     const void *value,
     uint32_t value_size);
+```
 
+#### iec_get_option
+
+```c
 /**
  * @brief 查询运行时选项。
  *
@@ -230,7 +274,11 @@ iec_status_t iec_get_option(
     iec_option_t option,
     void *value,
     uint32_t *inout_value_size);
+```
 
+#### iec_start
+
+```c
 /**
  * @brief 启动会话。
  *
@@ -246,7 +294,11 @@ iec_status_t iec_get_option(
  * @note 返回成功仅表示启动请求已被接受，最终运行状态通过异步回调体现。
  */
 iec_status_t iec_start(iec_session_t *session);
+```
 
+#### iec_stop
+
+```c
 /**
  * @brief 停止会话。
  *
@@ -273,6 +325,8 @@ iec_status_t iec_stop(
 
 ### 4.2 数据面、命令与旁路接口
 
+#### iec_general_interrogation
+
 ```c
 /**
  * @brief 发起总召。
@@ -288,7 +342,11 @@ iec_status_t iec_stop(
 iec_status_t iec_general_interrogation(
     iec_session_t *session,
     const iec_interrogation_request_t *request);
+```
 
+#### iec_counter_interrogation
+
+```c
 /**
  * @brief 发起电度量召唤。
  *
@@ -303,7 +361,11 @@ iec_status_t iec_general_interrogation(
 iec_status_t iec_counter_interrogation(
     iec_session_t *session,
     const iec_counter_interrogation_request_t *request);
+```
 
+#### iec_read_point
+
+```c
 /**
  * @brief 按单点地址读取对象。
  *
@@ -318,7 +380,11 @@ iec_status_t iec_counter_interrogation(
 iec_status_t iec_read_point(
     iec_session_t *session,
     const iec_point_address_t *address);
+```
 
+#### iec_control_point
+
+```c
 /**
  * @brief 下发控制命令或设定值命令。
  *
@@ -335,7 +401,11 @@ iec_status_t iec_control_point(
     iec_session_t *session,
     const iec_command_request_t *request,
     uint32_t *out_command_id);
+```
 
+#### iec_clock_sync
+
+```c
 /**
  * @brief 发送校时命令。
  *
@@ -350,7 +420,11 @@ iec_status_t iec_control_point(
 iec_status_t iec_clock_sync(
     iec_session_t *session,
     const iec_clock_sync_request_t *request);
+```
 
+#### iec_send_raw_asdu
+
+```c
 /**
  * @brief 发送原始 ASDU。
  *
@@ -376,6 +450,8 @@ iec_status_t iec_send_raw_asdu(
 
 ### 4.3 参数接口
 
+#### iec_get_device_description
+
 ```c
 /**
  * @brief 获取终端自描述内容。
@@ -393,7 +469,11 @@ iec_status_t iec_get_device_description(
     iec_session_t *session,
     const iec_device_description_request_t *request,
     uint32_t *out_request_id);
+```
 
+#### iec_read_parameters
+
+```c
 /**
  * @brief 读取参数。
  *
@@ -410,7 +490,11 @@ iec_status_t iec_read_parameters(
     iec_session_t *session,
     const iec_parameter_read_request_t *request,
     uint32_t *out_request_id);
+```
 
+#### iec_write_parameters
+
+```c
 /**
  * @brief 批量写入参数。
  *
@@ -427,7 +511,11 @@ iec_status_t iec_write_parameters(
     iec_session_t *session,
     const iec_parameter_write_request_t *request,
     uint32_t *out_request_id);
+```
 
+#### iec_verify_parameters
+
+```c
 /**
  * @brief 发起参数回读校验。
  *
@@ -445,7 +533,11 @@ iec_status_t iec_verify_parameters(
     iec_session_t *session,
     const iec_parameter_verify_request_t *request,
     uint32_t *out_request_id);
+```
 
+#### iec_switch_setting_group
+
+```c
 /**
  * @brief 查询或切换定值区。
  *
@@ -472,6 +564,126 @@ iec_status_t iec_switch_setting_group(
 - `iec_verify_parameters` 用于模板下发后的显式回读校验，也可用于上层对关键参数做抽查。
 - `iec_switch_setting_group` 只建模当前区查询和切换动作，不在接口层扩展定值区批量管理策略。
 - `iec_get_device_description` 负责从终端取回 XML 或 msg 自描述内容，解析、缓存和界面生成由上层应用负责。
+
+### 4.4 文件接口
+
+#### iec_list_files
+
+```c
+/**
+ * @brief 召唤远端文件目录。
+ *
+ * @param[in]  session        目标会话句柄。
+ * @param[in]  request        文件目录请求，描述目标公共地址、目录名和是否附带文件详情。
+ * @param[out] out_request_id 请求 ID 输出地址。成功时由库生成，用于关联异步结果。
+ *
+ * @return 请求提交阶段的执行结果。
+ * @retval IEC_STATUS_OK 请求已进入发送流程。
+ *
+ * @note 目录项通过 `on_file_list_indication` 分帧返回，目录请求最终结果通过
+ *       `on_file_operation_result` 返回。
+ */
+iec_status_t iec_list_files(
+    iec_session_t *session,
+    const iec_file_list_request_t *request,
+    uint32_t *out_request_id);
+```
+
+#### iec_read_file
+
+```c
+/**
+ * @brief 读取远端文件，支持按偏移断点续传。
+ *
+ * @param[in]  session         目标会话句柄。
+ * @param[in]  request         文件读取请求，提供文件名、起始偏移和期望块大小。
+ * @param[out] out_transfer_id 传输 ID 输出地址。成功时由库生成，用于关联进度与最终结果。
+ *
+ * @return 请求提交阶段的执行结果。
+ * @retval IEC_STATUS_OK 请求已进入发送流程。
+ *
+ * @note 文件数据块通过 `on_file_data_indication` 回调返回，最终结果通过
+ *       `on_file_operation_result` 回调返回。
+ */
+iec_status_t iec_read_file(
+    iec_session_t *session,
+    const iec_file_read_request_t *request,
+    uint32_t *out_transfer_id);
+```
+
+#### iec_write_file
+
+```c
+/**
+ * @brief 写入远端文件，支持按偏移断点续传。
+ *
+ * @param[in]  session         目标会话句柄。
+ * @param[in]  request         文件写入请求，提供目标文件名、总大小、起始偏移和待发送内容窗口。
+ * @param[out] out_transfer_id 传输 ID 输出地址。成功时由库生成，用于关联状态与最终结果。
+ *
+ * @return 请求提交阶段的执行结果。
+ * @retval IEC_STATUS_OK 请求已进入发送流程。
+ *
+ * @note `request->content` 与 `request->content_size` 描述本次待发送窗口。
+ *       若需要断点续传，调用方可在后续重新发起 `iec_write_file`，
+ *       并使用新的 `start_offset` 与剩余内容窗口。
+ */
+iec_status_t iec_write_file(
+    iec_session_t *session,
+    const iec_file_write_request_t *request,
+    uint32_t *out_transfer_id);
+```
+
+#### iec_get_file_transfer_status
+
+```c
+/**
+ * @brief 查询文件传输状态快照。
+ *
+ * @param[in]  session      目标会话句柄。
+ * @param[in]  transfer_id  传输 ID。
+ * @param[out] out_status   文件传输状态输出地址。成功时写入当前本地状态视图。
+ *
+ * @return 查询阶段的执行结果。
+ * @retval IEC_STATUS_OK 查询成功。
+ *
+ * @note 本函数返回库内维护的本地状态快照，不主动触发远端轮询。
+ */
+iec_status_t iec_get_file_transfer_status(
+    const iec_session_t *session,
+    uint32_t transfer_id,
+    iec_file_transfer_status_t *out_status);
+```
+
+#### iec_cancel_file_transfer
+
+```c
+/**
+ * @brief 请求取消当前文件传输。
+ *
+ * @param[in] session     目标会话句柄。
+ * @param[in] transfer_id 传输 ID。
+ *
+ * @return 请求提交阶段的执行结果。
+ * @retval IEC_STATUS_OK 取消请求已进入处理流程。
+ *
+ * @note 取消是否最终生效以 `on_file_operation_result` 回调为准。
+ */
+iec_status_t iec_cancel_file_transfer(
+    iec_session_t *session,
+    uint32_t transfer_id);
+```
+
+行为约束如下：
+
+- 文件目录、文件读取、文件写入和断点续传属于统一高层运维能力，不通过 `iec_send_raw_asdu` 直接暴露。
+- `start_offset = 0` 表示首次完整传输；非零偏移表示调用方根据已确认偏移发起断点续传。
+- 当 `iec101_master_config_t.profile = IEC101_PROFILE_MAINTENANCE` 时，文件传输单块数据长度应按运维101的 `1024` 字节扩展上限建模；标准101场景仍应遵守传统 `255` 字节边界。
+- 若上层给出的 `max_chunk_size` 或 `preferred_chunk_size` 超过当前协议 profile 可承载上限，库内部应自动裁剪或分块，不要求调用方手工按帧拆分。
+- `iec_get_file_transfer_status` 只提供当前会话内可见的本地状态快照，适合外部轮询读取进度或恢复点。
+- 文件读写最终结果统一以 `on_file_operation_result` 为准；调用返回 `IEC_STATUS_OK` 仅表示请求已被受理。
+- 若对端返回否定确认、传送原因异常或厂商扩展错误，库应尽量填充 `iec_file_operation_result_t.cause_of_transmission`、`native_error_code` 和 `detail_message`，便于上层排障。
+- 文件接口与自描述接口并行存在；`iec_get_device_description` 仍负责终端模型文件的专用获取语义，不要求上层自行拼装文件传输报文。
 
 ## 5. 公共类型与回调
 
@@ -512,6 +724,11 @@ typedef enum iec_option {
     IEC_OPTION_ENABLE_RAW_ASDU = 4        /* 是否启用原始 ASDU 旁路, 允许运行时修改 */
 } iec_option_t;
 ```
+
+协议建模约束如下：
+
+- 运维101场景仍归属于 `IEC_PROTOCOL_101`，不额外引入第三种公共协议枚举。
+- 若 `iec101_master_config_t.profile` 取 `IEC101_PROFILE_MAINTENANCE`，`iec_get_protocol` 仍返回 `IEC_PROTOCOL_101`。
 
 以下参数在 `iec_create` 阶段确定：
 
@@ -660,7 +877,7 @@ typedef struct iec_raw_asdu_tx {
 } iec_raw_asdu_tx_t;
 ```
 
-### 5.4 参数与自描述模型
+### 5.4 参数、自描述与文件模型
 
 ```c
 typedef enum iec_device_description_format {
@@ -683,6 +900,130 @@ typedef struct iec_device_description {
     uint32_t content_size;                      /* 当前分片长度 */
     uint8_t is_complete;                        /* 是否已接收完整内容 */
 } iec_device_description_t;
+
+typedef enum iec_file_operation {
+    IEC_FILE_OPERATION_LIST = 1,   /* 文件目录召唤 */
+    IEC_FILE_OPERATION_READ = 2,   /* 文件读取 */
+    IEC_FILE_OPERATION_WRITE = 3,  /* 文件写入 */
+    IEC_FILE_OPERATION_CANCEL = 4  /* 取消文件传输 */
+} iec_file_operation_t;
+
+typedef enum iec_file_transfer_direction {
+    IEC_FILE_TRANSFER_DIRECTION_READ = 1,  /* 远端到本地 */
+    IEC_FILE_TRANSFER_DIRECTION_WRITE = 2  /* 本地到远端 */
+} iec_file_transfer_direction_t;
+
+typedef enum iec_file_transfer_state {
+    IEC_FILE_TRANSFER_STATE_ACCEPTED = 1,  /* 请求已被受理 */
+    IEC_FILE_TRANSFER_STATE_RUNNING = 2,   /* 正在传输 */
+    IEC_FILE_TRANSFER_STATE_COMPLETED = 3, /* 已完成 */
+    IEC_FILE_TRANSFER_STATE_CANCELED = 4,  /* 已取消 */
+    IEC_FILE_TRANSFER_STATE_FAILED = 5     /* 传输失败 */
+} iec_file_transfer_state_t;
+
+typedef enum iec_file_result_code {
+    IEC_FILE_RESULT_ACCEPTED = 1,          /* 请求被受理 */
+    IEC_FILE_RESULT_COMPLETED = 2,         /* 传输完成 */
+    IEC_FILE_RESULT_CANCELED = 3,          /* 传输被取消 */
+    IEC_FILE_RESULT_REJECTED = 4,          /* 对端拒绝 */
+    IEC_FILE_RESULT_NEGATIVE_CONFIRM = 5,  /* 收到否定确认 */
+    IEC_FILE_RESULT_OFFSET_MISMATCH = 6,   /* 偏移不匹配 */
+    IEC_FILE_RESULT_TIMEOUT = 7,           /* 文件请求超时 */
+    IEC_FILE_RESULT_PROTOCOL_ERROR = 8,    /* 协议处理错误 */
+    IEC_FILE_RESULT_NOT_FOUND = 9          /* 目标文件不存在 */
+} iec_file_result_code_t;
+
+typedef struct iec_file_list_request {
+    uint16_t common_address;                /* 目标公共地址 */
+    const char *directory_name;             /* 目录名或路径 */
+    uint8_t include_details;                /* 是否附带文件详情 */
+} iec_file_list_request_t;
+
+typedef struct iec_file_entry {
+    const char *directory_name;             /* 所属目录 */
+    const char *file_name;                  /* 文件名 */
+    uint32_t file_size;                     /* 文件大小 */
+    uint64_t modified_timestamp_ms;         /* 最后修改时间戳 */
+    uint8_t is_directory;                   /* 是否为目录 */
+    uint8_t is_read_only;                   /* 是否只读 */
+    const char *checksum_text;              /* 可选校验摘要文本 */
+} iec_file_entry_t;
+
+typedef struct iec_file_list_indication {
+    uint32_t request_id;                    /* 与目录请求 ID 对应 */
+    uint16_t common_address;                /* 目标公共地址 */
+    const char *directory_name;             /* 当前目录 */
+    const iec_file_entry_t *entries;        /* 目录项数组视图 */
+    uint32_t entry_count;                   /* 本帧目录项数量 */
+    uint8_t is_final;                       /* 是否为最后一帧 */
+} iec_file_list_indication_t;
+
+typedef struct iec_file_read_request {
+    uint16_t common_address;                /* 目标公共地址 */
+    const char *directory_name;             /* 文件所在目录 */
+    const char *file_name;                  /* 目标文件名 */
+    uint32_t start_offset;                  /* 起始偏移, 0 表示首次读取 */
+    uint32_t max_chunk_size;                /* 期望分块大小 */
+    uint32_t expected_file_size;            /* 上层已知的总大小, 0 表示未知 */
+} iec_file_read_request_t;
+
+typedef struct iec_file_write_request {
+    uint16_t common_address;                /* 目标公共地址 */
+    const char *directory_name;             /* 文件所在目录 */
+    const char *file_name;                  /* 目标文件名 */
+    uint32_t start_offset;                  /* 起始偏移, 0 表示首次写入 */
+    uint32_t total_size;                    /* 远端目标文件总大小 */
+    const uint8_t *content;                 /* 本次待发送内容窗口 */
+    uint32_t content_size;                  /* 本次待发送窗口大小 */
+    uint32_t preferred_chunk_size;          /* 建议分块大小 */
+    uint8_t overwrite_existing;             /* 是否允许覆盖已有文件 */
+} iec_file_write_request_t;
+
+typedef struct iec_file_data_indication {
+    uint32_t transfer_id;                   /* 文件传输 ID */
+    iec_file_transfer_direction_t direction; /* 传输方向 */
+    uint16_t common_address;                /* 目标公共地址 */
+    const char *directory_name;             /* 文件所在目录 */
+    const char *file_name;                  /* 文件名 */
+    uint32_t total_size;                    /* 文件总大小 */
+    uint32_t current_offset;                /* 当前块起始偏移 */
+    uint32_t next_offset;                   /* 下一个建议偏移 */
+    const uint8_t *data;                    /* 当前数据块视图 */
+    uint32_t data_size;                     /* 当前数据块大小 */
+    uint8_t is_final;                       /* 是否为最后一块 */
+} iec_file_data_indication_t;
+
+typedef struct iec_file_transfer_status {
+    uint32_t transfer_id;                   /* 文件传输 ID */
+    iec_file_transfer_direction_t direction; /* 传输方向 */
+    iec_file_transfer_state_t state;        /* 当前状态 */
+    uint16_t common_address;                /* 目标公共地址 */
+    const char *directory_name;             /* 文件所在目录 */
+    const char *file_name;                  /* 文件名 */
+    uint32_t total_size;                    /* 文件总大小 */
+    uint32_t acknowledged_offset;           /* 已确认偏移 */
+    uint8_t is_resumable;                   /* 是否可按当前偏移续传 */
+    iec_file_result_code_t last_result;     /* 最近一次结果码 */
+    uint8_t last_cause_of_transmission;     /* 最近一次协议传送原因, 0 表示未知 */
+    int32_t last_native_error_code;         /* 最近一次底层或厂商扩展错误码 */
+} iec_file_transfer_status_t;
+
+typedef struct iec_file_operation_result {
+    uint32_t request_id;                    /* 与目录请求 ID 对应, 非目录时可为 0 */
+    uint32_t transfer_id;                   /* 与传输 ID 对应, 非读写时可为 0 */
+    iec_file_operation_t operation;         /* 对应操作 */
+    iec_file_transfer_direction_t direction; /* 传输方向, 非读写时可忽略 */
+    iec_file_result_code_t result;          /* 结果码 */
+    uint16_t common_address;                /* 目标公共地址 */
+    const char *directory_name;             /* 文件所在目录 */
+    const char *file_name;                  /* 文件名 */
+    uint32_t final_offset;                  /* 最终确认偏移 */
+    uint32_t total_size;                    /* 文件总大小 */
+    uint8_t cause_of_transmission;          /* 协议传送原因, 0 表示未知 */
+    int32_t native_error_code;              /* 底层或厂商扩展错误码 */
+    const char *detail_message;             /* 可选诊断文本 */
+    uint8_t is_final;                       /* 是否为最终结果 */
+} iec_file_operation_result_t;
 
 typedef enum iec_parameter_scope {
     IEC_PARAMETER_SCOPE_ALL = 0,      /* 全部参数 */
@@ -828,13 +1169,19 @@ typedef struct iec_parameter_result {
 } iec_parameter_result_t;
 ```
 
-参数与自描述模型约束如下：
+参数、自描述与文件模型约束如下：
 
 - `iec_parameter_scope_t` 用于统一表达固有参数、运行参数、动作参数和各类模块参数，不在接口层为无线、电源、线损单独派生函数族。
 - `iec_parameter_descriptor_t` 用于承载参数名称、范围、缺省值和模板/校验能力，便于上层构建模板和参数编辑界面。
 - `iec_parameter_item_t` 只表达当前参数值；若上层需要保留参数名称、单位等元数据，应结合 `descriptor` 一并缓存。
 - `include_descriptor` 适合首次建模或模板加载场景；频繁轮询场景下可关闭以减少冗余数据。
 - `setting_group` 统一使用 `0` 表示当前定值区，上层无需预先知道实际区号即可发起读取或写入。
+- `iec_file_list_request_t` 和 `iec_file_list_indication_t` 只表达目录召唤语义，不承担文件内容传输职责。
+- `start_offset = 0` 表示首次完整传输；调用方可使用 `iec_file_data_indication_t.next_offset` 或 `iec_file_transfer_status_t.acknowledged_offset` 作为断点续传恢复点。
+- 运维101文件传输场景下，单块数据窗口建议不超过 `1024` 字节；标准101场景下，单块数据窗口建议不超过 `255` 字节。
+- `iec_file_write_request_t.total_size` 描述远端目标文件总长度，`content_size` 描述本次待发送窗口长度；上层可一次性提供完整文件，也可在续传场景只提供剩余窗口。
+- `iec_file_operation_result_t.cause_of_transmission`、`native_error_code` 和 `detail_message` 用于承接否定确认、传送原因失败、偏移非法等诊断细节；`detail_message` 为空时，上层至少应结合 `result` 与 `cause_of_transmission` 做错误归因。
+- `iec_file_list_indication_t.entries`、`iec_file_data_indication_t.data` 以及文件回调结果中的字符串字段仅在当前回调期间有效，若需跨线程保留应立即拷贝。
 
 ### 5.5 回调类型与回调集合
 
@@ -939,6 +1286,46 @@ typedef void (*iec_on_device_description_fn)(
     void *user_context);
 
 /**
+ * @brief 文件目录结果回调。
+ *
+ * @param[in] session      触发回调的会话句柄。
+ * @param[in] indication   目录项视图。
+ * @param[in] user_context 用户上下文，原样来自 `iec_session_config_t.user_context`。
+ *
+ * @note `indication->entries` 及其中的字符串字段仅在当前回调期间有效。
+ */
+typedef void (*iec_on_file_list_indication_fn)(
+    iec_session_t *session,
+    const iec_file_list_indication_t *indication,
+    void *user_context);
+
+/**
+ * @brief 文件数据块回调。
+ *
+ * @param[in] session      触发回调的会话句柄。
+ * @param[in] indication   文件数据块视图。
+ * @param[in] user_context 用户上下文，原样来自 `iec_session_config_t.user_context`。
+ *
+ * @note `indication->data` 仅在当前回调期间有效；若需持久化文件内容，应立即拷贝。
+ */
+typedef void (*iec_on_file_data_indication_fn)(
+    iec_session_t *session,
+    const iec_file_data_indication_t *indication,
+    void *user_context);
+
+/**
+ * @brief 文件类操作结果回调。
+ *
+ * @param[in] session      触发回调的会话句柄。
+ * @param[in] result       文件目录、文件读写或取消请求结果视图。
+ * @param[in] user_context 用户上下文，原样来自 `iec_session_config_t.user_context`。
+ */
+typedef void (*iec_on_file_operation_result_fn)(
+    iec_session_t *session,
+    const iec_file_operation_result_t *result,
+    void *user_context);
+
+/**
  * @brief 参数读取结果回调。
  *
  * @param[in] session      触发回调的会话句柄。
@@ -1000,6 +1387,9 @@ typedef struct iec_callbacks {
     iec_on_point_indication_fn on_point_indication; /* 点表回调 */
     iec_on_command_result_fn on_command_result; /* 命令结果回调 */
     iec_on_device_description_fn on_device_description; /* 自描述回调 */
+    iec_on_file_list_indication_fn on_file_list_indication; /* 文件目录回调 */
+    iec_on_file_data_indication_fn on_file_data_indication; /* 文件数据回调 */
+    iec_on_file_operation_result_fn on_file_operation_result; /* 文件结果回调 */
     iec_on_parameter_indication_fn on_parameter_indication; /* 参数读取回调 */
     iec_on_parameter_result_fn on_parameter_result; /* 参数结果回调 */
     iec_on_raw_asdu_fn on_raw_asdu;           /* 原始 ASDU 回调 */
@@ -1014,11 +1404,11 @@ typedef struct iec_callbacks {
 - 不同会话之间回调允许并发发生。
 - 回调函数必须尽快返回，禁止执行长时间阻塞操作。
 - 回调中采用业务队列、轻量级拷贝和异步处理模式最稳妥。
-- 若需要跨线程保留回调中的地址、点值、参数描述、自描述内容、日志内容或原始 ASDU 数据，调用方应自行拷贝。
+- 若需要跨线程保留回调中的地址、点值、参数描述、自描述内容、文件目录项、文件数据块、日志内容或原始 ASDU 数据，调用方应自行拷贝。
 
 回调重入规则如下：
 
-- `on_point_indication`、`on_command_result`、`on_parameter_indication`、`on_parameter_result`、`on_raw_asdu` 允许在其他业务线程触发新的控制 API。
+- `on_point_indication`、`on_command_result`、`on_file_list_indication`、`on_file_data_indication`、`on_file_operation_result`、`on_parameter_indication`、`on_parameter_result`、`on_raw_asdu` 允许在其他业务线程触发新的控制 API。
 - 库内部保证线程安全，业务时序由上层状态机或串行控制线程协调。
 - 生命周期控制 API 与回调之间的竞态由调用方控制。
 
@@ -1046,12 +1436,17 @@ typedef struct iec_session_config {
 - `user_context` 透传给所有回调。
 - `startup_timeout_ms` 和 `stop_timeout_ms` 定义同步等待窗口。
 - `reconnect_interval_ms`、`command_timeout_ms`、`enable_raw_asdu` 允许运行时通过 `iec_set_option` 修改。
-- `command_timeout_ms` 同时作为命令类请求和参数类请求的缺省等待窗口。
+- `command_timeout_ms` 同时作为命令类请求、参数类请求和文件类请求的缺省等待窗口。
 - `initial_log_level` 作为 `IEC_OPTION_LOG_LEVEL` 的初始值。
 
 ### 6.2 IEC 101 扩展配置
 
 ```c
+typedef enum iec101_profile {
+    IEC101_PROFILE_STANDARD = 1,    /* 标准 101 */
+    IEC101_PROFILE_MAINTENANCE = 2  /* 运维 101 */
+} iec101_profile_t;
+
 typedef enum iec101_link_mode {
     IEC101_LINK_MODE_UNBALANCED = 1, /* 非平衡链路 */
     IEC101_LINK_MODE_BALANCED = 2    /* 平衡链路 */
@@ -1064,6 +1459,7 @@ typedef enum iec101_parity {
 } iec101_parity_t;
 
 typedef struct iec101_master_config {
+    iec101_profile_t profile;               /* 101 协议 profile */
     const char *serial_device;                /* 串口设备路径 */
     uint32_t baud_rate;                       /* 波特率 */
     uint8_t data_bits;                        /* 数据位 */
@@ -1084,6 +1480,8 @@ typedef struct iec101_master_config {
 
 101 扩展配置约束如下：
 
+- `profile` 用于区分标准 101 与运维 101；运维101文件能力是否可用由 `profile` 与终端能力共同决定。
+- 运维101 profile 在文件传输场景下支持将单块数据窗口从传统 `255` 字节扩展到 `1024` 字节；库内部应据此控制分块和续传偏移推进。
 - `serial_device`、`baud_rate`、`data_bits`、`stop_bits`、`parity` 为串口必填项。
 - `link_mode` 默认建议取 `IEC101_LINK_MODE_UNBALANCED`。
 - `link_address_length`、`common_address_length`、`information_object_address_length`、`cot_length` 在创建阶段确定。
@@ -1152,13 +1550,20 @@ iec_status_t iec101_validate_config(const iec101_master_config_t *config);
 iec_status_t iec104_validate_config(const iec104_master_config_t *config);
 ```
 
-### 6.5 参数与自描述协议映射约定
+### 6.5 参数、自描述与文件传输协议映射约定
 
 - 参数读取与参数写入统一映射到库内部参数通道，对上层保持协议无关；对接 101/104 时，库内部按 `TI=202`、`TI=203` 及对应传送原因完成封装和解析。
 - 当 `iec_read_parameters` 选择“读取全部参数”时，库内部应优先采用 `VSQ=0x00` 的整表读取语义，并在最终分帧到达后发出 `is_final = 1` 的参数回调。
 - 对于远程参数上送的结束判定，库内部应识别参数特征标识 `PI` 的后续状态位结束语义；上层只感知结构化参数事件，不直接感知原始字段。
 - `iec_switch_setting_group` 在接口层只表达“查询当前区”和“切换目标区”两类动作，具体采用的 101/104 过程或厂商扩展过程由库内部封装。
+- 当 `iec101_master_config_t.profile = IEC101_PROFILE_MAINTENANCE` 时，库内部可启用运维101专用文件目录、文件读写和升级类运维能力；标准101或104若目标终端不支持该能力，应返回明确的 `IEC_STATUS_UNSUPPORTED` 或异步结果码。
+- 运维101文件传输采用从 `255` 字节扩展到 `1024` 字节的单块数据窗口语义；若上层请求更大块大小，库应自动拆分为多个 `1024` 字节以内的发送或接收窗口。
+- 文件目录召唤通过统一文件通道返回 `iec_file_list_indication_t` 分帧结果，并以 `iec_file_operation_result_t` 作为目录请求最终结果。
+- 文件读取与文件写入统一采用 `start_offset` 断点语义；首次传输使用 `start_offset = 0`，续传使用最近已确认的 `next_offset` 或 `acknowledged_offset`。
+- `iec_get_file_transfer_status` 返回库内部维护的本地快照，适合外部轮询进度、恢复点和是否可续传状态，不要求上层自行跟踪协议分帧细节。
+- 文件类异步结果除 `result` 外，还应尽量回填原始 `cause_of_transmission`、底层错误码和诊断文本，用于表达“传送原因失败”“否定确认”“厂商拒绝”等细粒度失败原因。
 - `iec_get_device_description` 支持 XML 或 msg 自描述内容。库内部可通过专用文件传输通道或扩展 ASDU 通道获取，上层只接收最终的结构化内容视图。
+- 即使 `iec_get_device_description` 底层复用了文件传输通道，上层仍应优先使用专用自描述 API，而不是用通用文件 API 自行拼装终端模型文件读取过程。
 - 自描述文件建议控制在 64KB 以内。若终端返回分片内容，库内部负责重组，并通过 `iec_device_description_t.is_complete` 标记是否接收完成。
 
 ## 7. 最小调用流程
@@ -1201,6 +1606,7 @@ iec_session_config_t common = {
 
 /* 101 扩展配置: 定义串口参数、链路模式和地址长度。 */
 iec101_master_config_t cfg101 = {
+    .profile = IEC101_PROFILE_STANDARD,       /* 当前流程按标准 101 展开 */
     .serial_device = "/dev/ttyS1",           /* 串口设备路径 */
     .baud_rate = 9600,                       /* 波特率 */
     .data_bits = 8,                          /* 数据位 */
@@ -1631,6 +2037,160 @@ static void on_device_description(
 2. 动态库只负责把 XML 或 msg 内容安全取回，不负责解析成最终界面。
 3. 上层可基于自描述内容构建参数模板、点表映射和界面分组信息。
 
+### 7.9 文件目录召唤流程
+
+以下流程以支持文件服务的终端为例；若目标终端或协议 profile 不支持该能力，库应返回明确的 `IEC_STATUS_UNSUPPORTED` 或异步结果码。
+
+```mermaid
+sequenceDiagram
+    participant 应用 as 上层应用
+    participant 库 as 动态库
+    participant 终端 as 配电终端
+    participant 回调 as 文件目录回调
+
+    应用->>库: iec_list_files(session, request, &request_id)
+    库-->>应用: IEC_STATUS_OK + request_id
+    库->>终端: 发起文件目录召唤
+    终端-->>库: 返回目录分帧
+    库->>回调: on_file_list_indication(entries, is_final=0/1)
+    库->>回调: on_file_operation_result(LIST, COMPLETED)
+```
+
+```c
+iec_file_list_request_t list_req = {
+    .common_address = 1,
+    .directory_name = "/maint",
+    .include_details = 1
+};
+
+uint32_t list_request_id = 0;
+iec_list_files(session, &list_req, &list_request_id);
+```
+
+推荐处理步骤如下：
+
+1. 首次目录召唤建议开启 `include_details = 1`，同时获取大小、时间戳和校验摘要。
+2. `on_file_list_indication` 负责分帧返回目录项，`on_file_operation_result` 负责标记本次目录请求是否最终完成。
+3. 目录项和字符串字段仅在回调期间有效，若上层需要用于界面展示或后续传输，应立即拷贝。
+
+### 7.10 文件读取与断点续传流程
+
+以下流程用于从终端读取文件，并在链路中断后依据最近已确认偏移恢复传输。
+
+```mermaid
+sequenceDiagram
+    participant 应用 as 上层应用
+    participant 库 as 动态库
+    participant 终端 as 配电终端
+    participant 回调 as 文件数据回调
+
+    应用->>库: iec_read_file(session, start_offset=0, &transfer_id)
+    库-->>应用: IEC_STATUS_OK + transfer_id
+    库->>终端: 发起文件读取
+    终端-->>库: 返回文件分块
+    库->>回调: on_file_data_indication(next_offset)
+    Note over 应用,库: 链路中断后查询本地状态快照
+    应用->>库: iec_get_file_transfer_status(session, transfer_id, &status)
+    应用->>库: iec_read_file(session, start_offset=status.acknowledged_offset, &new_transfer_id)
+    库->>回调: on_file_operation_result(READ, COMPLETED)
+```
+
+```c
+iec_file_read_request_t read_req = {
+    .common_address = 1,
+    .directory_name = "/maint",
+    .file_name = "terminal.xml",
+    .start_offset = 0,
+    .max_chunk_size = 1024,                  /* 运维101场景下建议按 1024 字节窗口读取 */
+    .expected_file_size = 0
+};
+
+uint32_t read_transfer_id = 0;
+iec_read_file(session, &read_req, &read_transfer_id);
+
+static void on_file_data_indication(
+    iec_session_t *session,
+    const iec_file_data_indication_t *indication,
+    void *user_context)
+{
+    (void)session;
+    (void)user_context;
+
+    /* 立即拷贝当前数据块并记录 next_offset, 供断点续传恢复使用。 */
+    (void)indication;
+}
+
+iec_file_transfer_status_t read_status;
+iec_get_file_transfer_status(session, read_transfer_id, &read_status);
+if (read_status.is_resumable) {
+    read_req.start_offset = read_status.acknowledged_offset;
+    iec_read_file(session, &read_req, &read_transfer_id);
+}
+```
+
+推荐处理步骤如下：
+
+1. 文件读取过程中应始终以 `next_offset` 或 `acknowledged_offset` 作为唯一可信恢复点。
+2. 回调内不要直接写磁盘或做大块解压，宜先拷贝到业务缓冲区，再交给后台线程处理。
+3. 若 `on_file_operation_result` 返回 `OFFSET_MISMATCH`，应重新同步目录信息或按终端当前偏移重新发起读取。
+
+### 7.11 文件写入与断点续传流程
+
+以下流程以 `iec101_master_config_t.profile = IEC101_PROFILE_MAINTENANCE` 为例，展示如何向终端写入文件并按已确认偏移续传。
+
+```mermaid
+sequenceDiagram
+    participant 应用 as 上层应用
+    participant 库 as 动态库
+    participant 终端 as 配电终端
+    participant 回调 as 文件结果回调
+
+    应用->>库: iec_write_file(session, start_offset=0, &transfer_id)
+    库-->>应用: IEC_STATUS_OK + transfer_id
+    库->>终端: 分块发送文件内容
+    终端-->>库: 返回写入确认
+    Note over 应用,库: 若链路中断, 查询已确认偏移
+    应用->>库: iec_get_file_transfer_status(session, transfer_id, &status)
+    应用->>库: iec_write_file(session, start_offset=status.acknowledged_offset, &new_transfer_id)
+    库->>回调: on_file_operation_result(WRITE, COMPLETED)
+```
+
+```c
+const uint8_t *image = firmware_blob;
+uint32_t image_size = firmware_blob_size;
+
+iec_file_write_request_t write_req = {
+    .common_address = 1,
+    .directory_name = "/upgrade",
+    .file_name = "fw.bin",
+    .start_offset = 0,
+    .total_size = image_size,
+    .content = image,
+    .content_size = image_size,
+    .preferred_chunk_size = 1024,            /* 运维101场景下建议按 1024 字节窗口写入 */
+    .overwrite_existing = 1
+};
+
+uint32_t write_transfer_id = 0;
+iec_write_file(session, &write_req, &write_transfer_id);
+
+iec_file_transfer_status_t write_status;
+iec_get_file_transfer_status(session, write_transfer_id, &write_status);
+if (write_status.is_resumable && write_status.acknowledged_offset < image_size) {
+    write_req.start_offset = write_status.acknowledged_offset;
+    write_req.content = image + write_status.acknowledged_offset;
+    write_req.content_size = image_size - write_status.acknowledged_offset;
+    iec_write_file(session, &write_req, &write_transfer_id);
+}
+```
+
+推荐处理步骤如下：
+
+1. 文件写入的 `total_size` 始终描述远端完整目标文件大小，即使当前只是续传窗口。
+2. 续传时只更新 `start_offset`、`content` 和 `content_size`，不要修改目标文件名和总大小。
+3. 运维101文件写入场景下建议以 `1024` 字节作为单块发送窗口上限，超过部分由库自动拆分并推进偏移。
+4. 文件写入最终成功、失败、取消或否定确认都以 `on_file_operation_result` 为准。
+
 ## 8. 运行约束与设计说明
 
 ### 8.1 生命周期约束
@@ -1648,6 +2208,7 @@ static void on_device_description(
 - 用户传入 `iec_create` 的配置结构体和回调结构体，在函数返回后可释放，动态库内部应完成必要拷贝。
 - 用户传入的字符串参数在 `iec_create` 返回前必须有效，返回后是否长期保留由库内部拷贝决定。
 - 回调收到的事件数据由动态库持有，在回调执行窗口内供调用方读取和拷贝。
+- 文件写入请求中的 `content` 只表达本次待发送窗口；调用方可选择一次性提供完整内容，也可在续传场景下提供剩余窗口。
 - 接口返回模式统一采用调用方缓冲区和回调只读视图。
 
 ### 8.3 错误处理约束
@@ -1668,6 +2229,7 @@ static void on_device_description(
 - 运行期协议错误。
 - 命令应答结果。
 - 参数写入、参数校验和定值区切换结果。
+- 文件目录召唤、文件读取、文件写入和取消结果。
 - 日志和告警信息。
 
 推荐约定如下：
@@ -1675,24 +2237,29 @@ static void on_device_description(
 - 同步返回 `IEC_STATUS_OK` 表示请求已进入处理流程，业务动作的完成情况通过后续回调体现。
 - 命令下发最终结果以 `on_command_result` 为准。
 - 参数写入、参数校验和定值区切换最终结果以 `on_parameter_result` 为准。
+- 文件目录、文件读取、文件写入和取消最终结果以 `on_file_operation_result` 为准；若出现协议否定确认、传送原因异常或厂商扩展错误，应优先读取其中的诊断字段。
 - 运行期链路变化和协议事件通过异步回调通知上层。
 
 ### 8.4 高层数据主路径与原始旁路关系
 
 - 高层点表接口是默认主路径，业务系统应优先依赖 `on_point_indication`。
 - 参数接口是独立主路径，参数读取和参数写入不应通过点表接口或遥控接口拼装实现。
+- 文件接口是独立主路径，目录召唤、文件传输和断点续传不应通过 `iec_send_raw_asdu` 或自定义旁路报文暴露给上层。
 - 原始 ASDU 旁路作为调试抓包、扩展报文观察和受控透传通道。
 - 即使开启原始 ASDU 旁路，高层解码成功的报文仍继续生成高层事件。
 - `bypass_high_level_validation` 作用于高层对象约束，底层安全检查保持有效。
 
-### 8.5 参数接口边界
+### 8.5 参数与文件接口边界
 
 - 动态库负责参数读取、参数写入、回读校验、定值区切换、自描述获取以及协议字段与高层参数对象之间的映射。
+- 动态库负责文件目录召唤、文件读取、文件写入、传输状态维护、取消和断点续传恢复点管理。
 - 参数模板文件的导入、导出、版本管理和落盘由上层应用负责，不纳入动态库职责范围。
+- 本地文件的落盘、缓存目录管理、升级包来源校验和断点内容持久化由上层应用负责，不纳入动态库职责范围。
 - 自描述内容的 XML 或 msg 解析、参数分组展示、界面控件生成和参数变更审计由上层应用负责。
 - 无线模块、电源模块、线损模块在接口层统一视为参数域，避免为具体业务模块重复设计函数族。
 - `iec_read_point` 适合点表对象读取，不负责表达“读取全部运行参数”“读取某定值区全部参数”这类参数语义。
 - `iec_control_point` 适合遥控和设定值命令，不承担模板下发、参数批量写入和回读校验职责。
+- 通用文件 API 负责目录、数据块和续传偏移等高层文件语义；`iec_get_device_description` 继续承担终端模型文件的专用获取入口。
 
 ## 9. 头文件组织建议
 
@@ -1705,23 +2272,7 @@ static void on_device_description(
 
 建议组织原则如下：
 
-- `iec_types.h` 放公共枚举、结构体、参数对象和回调类型。
-- `iec_api.h` 放公共生命周期、运行控制、数据面接口和参数接口。
-- `iec101_api.h` 放 101 扩展配置、校验函数和未来专用能力。
+- `iec_types.h` 放公共枚举、结构体、参数对象、文件对象和回调类型。
+- `iec_api.h` 放公共生命周期、运行控制、数据面接口、参数接口和文件接口。
+- `iec101_api.h` 放 101 扩展配置、profile 枚举、校验函数和未来专用能力。
 - `iec104_api.h` 放 104 扩展配置、校验函数和未来专用能力。
-
-## 10. 评审检查清单
-
-评审时应重点检查以下事项：
-
-- 公共接口是否保持协议无关，没有将 101/104 专有语义泄漏到核心 API。
-- 公共结构体是否保持精简，字段语义是否与既有接入习惯一致。
-- 运行时可变参数与创建期固定参数边界是否清晰。
-- 回调线程模型是否足够明确，能否避免调用方误用。
-- 高层点表接口是否覆盖单点、双点、遥测、总召、遥控和校时主流程。
-- 参数接口是否覆盖参数读取、批量写入、回读校验、定值区切换和自描述获取主流程。
-- 参数模型是否能够表达固有参数、运行参数、动作参数以及无线/电源/线损模块参数。
-- 模板导入导出与动态库参数接口的职责边界是否清晰。
-- 原始 ASDU 旁路是否独立存在，且能作为高层主路径的并行调试通道。
-- 101 与 104 的最小创建流程是否闭环。
-- API 总览和示例代码能否帮助接入方快速理解使用路径。
