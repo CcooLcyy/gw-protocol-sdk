@@ -14,6 +14,12 @@ body {
   margin: 0 auto;
   max-width: 180mm;
   word-break: break-word;
+  orphans: 3;
+  widows: 3;
+}
+
+header#title-block-header {
+  display: none;
 }
 
 h1, h2, h3, h4, h5, h6 {
@@ -23,6 +29,8 @@ h1, h2, h3, h4, h5, h6 {
   line-height: 1.35;
   page-break-after: avoid;
   page-break-inside: avoid;
+  break-after: avoid-page;
+  break-inside: avoid-page;
   margin-top: 1.4em;
   margin-bottom: 0.55em;
 }
@@ -49,6 +57,30 @@ p, ul, ol, table, pre, blockquote {
   margin-bottom: 0.7em;
 }
 
+h1 + p,
+h1 + ul,
+h1 + ol,
+h1 + pre,
+h1 + table,
+h2 + p,
+h2 + ul,
+h2 + ol,
+h2 + pre,
+h2 + table,
+h3 + p,
+h3 + ul,
+h3 + ol,
+h3 + pre,
+h3 + table,
+h4 + p,
+h4 + ul,
+h4 + ol,
+h4 + pre,
+h4 + table {
+  page-break-before: avoid;
+  break-before: avoid-page;
+}
+
 ul, ol {
   padding-left: 1.6em;
 }
@@ -70,11 +102,13 @@ pre {
   color: #0f172a;
   border: 1px solid #dbeafe;
   border-radius: 8px;
-  padding: 0.9em 1em;
+  padding: 0.8em 0.9em;
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.75);
+  page-break-inside: avoid;
+  break-inside: avoid-page;
 }
 
 pre code {
@@ -88,13 +122,15 @@ blockquote {
   border-left: 4px solid #93c5fd;
   background: #eff6ff;
   padding: 0.6em 1em;
+  page-break-inside: avoid;
+  break-inside: avoid-page;
 }
 
 table {
   width: 100%;
   border-collapse: collapse;
   table-layout: fixed;
-  font-size: 10.2pt;
+  font-size: 9.8pt;
 }
 
 thead {
@@ -103,13 +139,15 @@ thead {
 
 tr {
   page-break-inside: avoid;
+  break-inside: avoid-page;
 }
 
 th, td {
   border: 1px solid #cbd5e1;
-  padding: 0.5em 0.55em;
+  padding: 0.42em 0.48em;
   vertical-align: top;
   text-align: left;
+  line-height: 1.55;
 }
 
 th {
@@ -141,5 +179,6 @@ img {
   border: 1px solid #cbd5e1;
   border-radius: 10px;
   background: #ffffff;
+  page-break-inside: avoid;
+  break-inside: avoid-page;
 }
-
