@@ -2,15 +2,16 @@
 
 ## 1. 文档目的
 
-本文档定义 `dtu-unified-maintenance-sdk` 的 `IEC 60870-5-101` / `IEC 60870-5-104` 协议层动态库接口草案，用于接口冻结、实现对齐和跨平台交付。
+本文档定义 `dtu-unified-maintenance-sdk` 的运维101、`IEC 60870-5-101`、`IEC 60870-5-104` 协议层动态库接口草案，用于接口冻结、实现对齐和跨平台交付。
 
-目标动态库产物包括 Windows `.dll`、Linux `.so` 和 Android `.so`。
+当前阶段优先交付 Windows `.dll`；后续可按同一 ABI 思路扩展 Linux `.so` 产物。接口设计需避免绑定 Windows 专用类型。
 
 本文档聚焦主站侧能力，采用以下设计原则：
 
-- 对外暴露统一核心接口，公共前缀使用 `iec_`。
-- 协议差异通过扩展配置和少量扩展函数承载，101 使用 `iec101_` 前缀，104 使用 `iec104_` 前缀。
+- 对外按三套动态库分别暴露协议前缀：运维101 使用 `m101_`，标准101 使用 `iec101_`，标准104 使用 `iec104_`。
+- 三套动态库复用公共类型、回调和错误语义，业务能力保持同形函数签名，便于上位机按协议选择接入。
 - 公共对象模型固定为单会话句柄，内部状态机实现由库内部维护。
+- 协议库通过外部 `transport` 收发明文协议帧，不直接操作串口、socket 或电科院安全接口库。
 - 对外 ABI 使用 C ABI，便于 C/C++ 及其他语言绑定。
 - 数据接口以高层点表对象为主，同时保留原始 ASDU 旁路能力。
 - 参数读取、批量写入、回读校验、定值区切换、文件目录召唤、文件读写和断点续传等统一运维能力通过独立高层接口承载。
@@ -18,11 +19,12 @@
 
 ## 2. 适用范围
 
-本文档当前聚焦主站侧 101/104 跨平台协议层动态库接口及 101 运维扩展能力，覆盖以下能力：
+本文档当前聚焦 Windows 上位机主站侧协议层动态库接口，并兼顾后续 Linux 移植约束，覆盖以下能力：
 
-- 101 主站会话创建、启动、停止、销毁。
-- 104 主站会话创建、启动、停止、销毁。
-- 运维101 profile 建模与标准 101 共享同一套会话生命周期和扩展配置骨架。
+- 运维101 主站会话创建、启动、停止、销毁。
+- 标准101 主站会话创建、启动、停止、销毁。
+- 标准104 主站会话创建、启动、停止、销毁。
+- 三套协议库共享会话生命周期、transport、回调和错误模型。
 - 点表上送事件建模，包括单点、双点、遥测、累计量等常见对象。
 - 参数读取、批量写入、回读校验、定值区管理和终端自描述获取。
 - 文件目录召唤、文件读取、文件写入、状态查询、取消和断点续传。
@@ -34,44 +36,51 @@
 
 ### 3.1 设计总原则
 
-- 公共 API 负责生命周期、运行控制、点表事件、命令、旁路和统一错误语义。
-- 101/104 差异只放在各自扩展配置中，不把串口细节或 TCP 细节泄漏到公共接口。
-- 运维101 作为 `IEC_PROTOCOL_101` 下的 profile 承载，不新增第三种公共协议枚举。
-- 文件目录、文件读写和断点续传保持公共 `iec_` API 命名，不把运维101专用报文细节暴露给上层。
+- 三套协议库分别导出带协议前缀的函数集，不通过统一函数表分发。
+- 公共类型负责生命周期、运行控制、点表事件、命令、旁路和统一错误语义。
+- 串口参数、远端地址、端口、安全认证和真实物理收发由上位机或安全适配层处理，不进入协议库配置。
+- 协议库通过 `iec_transport_t` 收发明文协议帧；明文传输、安全封装、串口或 socket 细节均由 transport 实现。
+- 文件目录、文件读写和断点续传保持同形函数签名；运维101库导出 `m101_` 前缀，标准101/104库导出各自协议前缀。
 - 公共结构体保持轻量字段布局，沿用项目既有接入习惯，不引入额外版本握手字段。
-- 所有回调都在 `iec_create` 阶段注册，由库内工作线程触发。
+- 所有回调都在 `<prefix>_create` 阶段注册，由库内工作线程触发。
 - 参数模板导入导出和界面生成由上层应用负责，动态库负责参数对象建模和协议交互。
+
+建议交付产物与函数前缀如下：
+
+| 动态库 | 协议定位 | 导出函数前缀 | 配置结构体 |
+| --- | --- | --- | --- |
+| `dtu_m101.dll` | 运维101 主站协议库 | `m101_` | `m101_master_config_t` |
+| `dtu_iec101.dll` | 标准 IEC 60870-5-101 主站协议库 | `iec101_` | `iec101_master_config_t` |
+| `dtu_iec104.dll` | 标准 IEC 60870-5-104 主站协议库 | `iec104_` | `iec104_master_config_t` |
 
 ### 3.2 核心函数总表
 
-以下核心函数均为公共 API，统一适用于 101/104；当目标协议 profile 或终端能力不支持某项运维能力时，动态库应返回明确的 `IEC_STATUS_UNSUPPORTED` 或异步结果码。
+以下为三套协议库保持同形的核心函数族。表中使用 `<prefix>` 表示协议前缀：运维101 为 `m101`，标准101 为 `iec101`，标准104 为 `iec104`。当目标协议或终端能力不支持某项运维能力时，动态库应返回明确的 `IEC_STATUS_UNSUPPORTED` 或异步结果码。
 
 | API | 用途 | 关键输入 | 同步返回含义 | 关联异步结果 |
 | --- | --- | --- | --- | --- |
-| `iec_create` | 创建会话对象并拷贝配置 | 公共配置、协议扩展配置、回调集合 | 表示会话对象初始化阶段是否完成 | 无 |
-| `iec_destroy` | 销毁会话对象 | 会话句柄 | 表示资源释放阶段是否完成 | 无 |
-| `iec_get_protocol` | 查询当前会话协议类型 | 会话句柄 | 是否成功写出协议枚举 | 无 |
-| `iec_get_status` | 查询当前运行状态 | 会话句柄 | 是否成功写出状态枚举 | 无 |
-| `iec_set_option` | 修改允许运行时变更的选项 | 选项枚举、值缓冲区 | 是否成功接受配置更新 | 部分改动会影响后续回调行为 |
-| `iec_get_option` | 查询当前选项值 | 选项枚举、输出缓冲区 | 是否成功读取当前值 | 无 |
-| `iec_start` | 启动工作线程并开始链路建立 | 会话句柄 | 启动请求是否被接受 | `on_session_state`、`on_link_event` |
-| `iec_stop` | 请求停止并等待会话退出 | 会话句柄、停止超时 | 停止请求是否完成 | `on_session_state` |
-| `iec_general_interrogation` | 发起总召 | 总召请求结构体 | 请求是否被接受 | `on_point_indication`、`on_link_event` |
-| `iec_counter_interrogation` | 发起电度量召唤 | 电度量召唤请求结构体 | 请求是否被接受 | `on_point_indication`、`on_link_event` |
-| `iec_read_point` | 按地址读取单个对象 | 点位地址 | 请求是否被接受 | `on_point_indication`、`on_link_event` |
-| `iec_control_point` | 下发遥控或设定值命令 | 命令请求结构体 | 请求是否被接受并生成命令 ID | `on_command_result` |
-| `iec_get_device_description` | 获取终端自描述内容 | 自描述请求结构体 | 请求是否被接受并生成请求 ID | `on_device_description` |
-| `iec_read_parameters` | 读取参数或参数分组 | 参数读取请求结构体 | 请求是否被接受并生成请求 ID | `on_parameter_indication` |
-| `iec_write_parameters` | 批量写入参数 | 参数写入请求结构体 | 请求是否被接受并生成请求 ID | `on_parameter_result` |
-| `iec_verify_parameters` | 按期望值回读校验参数 | 参数校验请求结构体 | 请求是否被接受并生成请求 ID | `on_parameter_result`、`on_parameter_indication` |
-| `iec_switch_setting_group` | 查询或切换定值区 | 定值区请求结构体 | 请求是否被接受并生成请求 ID | `on_parameter_result` |
-| `iec_list_files` | 召唤远端文件目录 | 文件目录请求结构体 | 请求是否被接受并生成请求 ID | `on_file_list_indication`、`on_file_operation_result` |
-| `iec_read_file` | 读取远端文件，支持按偏移续传 | 文件读取请求结构体 | 请求是否被接受并生成传输 ID | `on_file_data_indication`、`on_file_operation_result` |
-| `iec_write_file` | 写入远端文件，支持按偏移续传 | 文件写入请求结构体 | 请求是否被接受并生成传输 ID | `on_file_operation_result` |
-| `iec_get_file_transfer_status` | 查询文件传输本地状态快照 | 传输 ID | 是否成功写出当前状态视图 | 无 |
-| `iec_cancel_file_transfer` | 请求取消进行中的文件传输 | 传输 ID | 取消请求是否被接受 | `on_file_operation_result` |
-| `iec_clock_sync` | 发送校时命令 | 校时请求结构体 | 请求是否被接受 | `on_link_event`、日志回调 |
-| `iec_send_raw_asdu` | 主动透传原始 ASDU | 原始发送请求结构体 | 请求是否被接受 | `on_raw_asdu`、`on_link_event` |
+| `<prefix>_create` | 创建会话对象并拷贝配置 | 公共配置、协议扩展配置、transport、回调集合 | 表示会话对象初始化阶段是否完成 | 无 |
+| `<prefix>_destroy` | 销毁会话对象 | 会话句柄 | 表示资源释放阶段是否完成 | 无 |
+| `<prefix>_get_status` | 查询当前运行状态 | 会话句柄 | 是否成功写出状态枚举 | 无 |
+| `<prefix>_set_option` | 修改允许运行时变更的选项 | 选项枚举、值缓冲区 | 是否成功接受配置更新 | 部分改动会影响后续回调行为 |
+| `<prefix>_start` | 启动工作线程并进入协议会话流程 | 会话句柄 | 启动请求是否被接受 | `on_session_state`、`on_link_event` |
+| `<prefix>_stop` | 请求停止并等待会话退出 | 会话句柄、停止超时 | 停止请求是否完成 | `on_session_state` |
+| `<prefix>_general_interrogation` | 发起总召 | 总召请求结构体 | 请求是否被接受 | `on_point_indication`、`on_link_event` |
+| `<prefix>_counter_interrogation` | 发起电度量召唤 | 电度量召唤请求结构体 | 请求是否被接受 | `on_point_indication`、`on_link_event` |
+| `<prefix>_read_point` | 按地址读取单个对象 | 点位地址 | 请求是否被接受 | `on_point_indication`、`on_link_event` |
+| `<prefix>_control_point` | 下发遥控或设定值命令 | 命令请求结构体 | 请求是否被接受并生成命令 ID | `on_command_result` |
+| `<prefix>_get_device_description` | 获取终端自描述内容 | 自描述请求结构体 | 请求是否被接受并生成请求 ID | `on_device_description` |
+| `<prefix>_read_parameters` | 读取参数或参数分组 | 参数读取请求结构体 | 请求是否被接受并生成请求 ID | `on_parameter_indication` |
+| `<prefix>_write_parameters` | 批量写入参数 | 参数写入请求结构体 | 请求是否被接受并生成请求 ID | `on_parameter_result` |
+| `<prefix>_verify_parameters` | 按期望值回读校验参数 | 参数校验请求结构体 | 请求是否被接受并生成请求 ID | `on_parameter_result`、`on_parameter_indication` |
+| `<prefix>_switch_setting_group` | 查询或切换定值区 | 定值区请求结构体 | 请求是否被接受并生成请求 ID | `on_parameter_result` |
+| `<prefix>_list_files` | 召唤远端文件目录 | 文件目录请求结构体 | 请求是否被接受并生成请求 ID | `on_file_list_indication`、`on_file_operation_result` |
+| `<prefix>_read_file` | 读取远端文件，支持按偏移续传 | 文件读取请求结构体 | 请求是否被接受并生成传输 ID | `on_file_data_indication`、`on_file_operation_result` |
+| `<prefix>_write_file` | 写入远端文件，支持按偏移续传 | 文件写入请求结构体 | 请求是否被接受并生成传输 ID | `on_file_operation_result` |
+| `<prefix>_get_file_transfer_status` | 查询文件传输本地状态快照 | 传输 ID | 是否成功写出当前状态视图 | 无 |
+| `<prefix>_cancel_file_transfer` | 请求取消进行中的文件传输 | 传输 ID | 取消请求是否被接受 | `on_file_operation_result` |
+| `<prefix>_clock_sync` | 发送校时命令 | 校时请求结构体 | 请求是否被接受 | `on_link_event`、日志回调 |
+| `<prefix>_send_raw_asdu` | 主动透传原始 ASDU | 原始发送请求结构体 | 请求是否被接受 | `on_raw_asdu`、`on_link_event` |
 
 ### 3.3 关键回调总表
 
@@ -94,7 +103,8 @@
 
 | 结构体 | 作用 | 关键字段 |
 | --- | --- | --- |
-| `iec_session_config_t` | 公共配置 | `protocol`、超时、重连间隔、日志等级、`user_context` |
+| `iec_session_config_t` | 公共配置 | 超时、重连间隔、日志等级、`user_context` |
+| `iec_transport_t` | 外部传输接口 | 明文帧发送函数、明文帧接收函数、上下文、最大明文帧长 |
 | `iec_callbacks_t` | 回调集合 | 状态、链路、点表、命令、自描述、文件目录、文件数据、文件结果、参数、原始 ASDU、日志回调 |
 | `iec_point_address_t` | 协议原生地址 | 公共地址、信息体地址、类型标识、传送原因 |
 | `iec_point_value_t` | 高层点值 | 点值类型、质量位、时间戳、实际数据 |
@@ -113,8 +123,9 @@
 | `iec_file_transfer_status_t` | 文件传输状态快照 | 传输方向、状态、已确认偏移、是否可续传、最近一次底层错误信息 |
 | `iec_file_operation_result_t` | 文件操作结果 | 操作类型、结果码、最终偏移、总大小、协议诊断细节 |
 | `iec_raw_asdu_event_t` | 原始报文事件 | 收发方向、类型标识、公共地址、载荷视图 |
-| `iec101_master_config_t` | 101 扩展配置 | profile、串口、链路地址、字段长度、重发参数 |
-| `iec104_master_config_t` | 104 扩展配置 | 远端地址、端口、连接模式、K/W/T 参数 |
+| `m101_master_config_t` | 运维101 扩展配置 | 链路地址、字段长度、重发参数、运维文件能力约束 |
+| `iec101_master_config_t` | 标准101 扩展配置 | 链路地址、字段长度、重发参数 |
+| `iec104_master_config_t` | 104 扩展配置 | 地址字段长度、K/W/T 参数 |
 
 ### 3.5 对外句柄与头文件骨架
 
@@ -131,570 +142,341 @@ typedef struct iec_session iec_session_t;
 #endif
 ```
 
-## 4. 公共 API 详细定义
+## 4. 同形导出 API 详细定义
 
 ### 4.1 会话管理与运行控制
 
-#### iec_create
+#### <prefix>_create
 
-```c
-/**
- * @brief 创建会话对象。
- *
- * 根据公共配置、协议扩展配置和回调集合创建一个新的会话实例。
- * 本函数仅表示对象创建阶段是否成功，不表示链路已经建立或启动完成；
- * 链路状态通过后续启动流程及异步回调体现。
- *
- * @param[in]  config
- *     公共配置，定义协议类型、超时和用户上下文。
- * @param[in]  protocol_config
- *     协议扩展配置。
- *     当 `config->protocol` 为 `IEC_PROTOCOL_101` 时，应指向 101 配置结构；
- *     当 `config->protocol` 为 `IEC_PROTOCOL_104` 时，应指向 104 配置结构。
- * @param[in]  callbacks
- *     异步回调集合。创建成功后，库内部持有其副本。
- * @param[out] out_session
- *     输出会话句柄地址。成功时写入新建会话对象。
- *
- * @return 创建阶段的执行结果。
- * @retval IEC_STATUS_OK 创建成功。
- *
- * @pre `config != NULL`
- * @pre `protocol_config != NULL`
- * @pre `callbacks != NULL`
- * @pre `out_session != NULL`
- * @post 成功时 `*out_session != NULL`
- *
- * @note 物理连接、串口打开和工作线程启动由 `iec_start` 承担。
- */
-iec_status_t iec_create(
-    const iec_session_config_t *config,
-    const void *protocol_config,
-    const iec_callbacks_t *callbacks,
-    iec_session_t **out_session);
-```
+| 字段 | 内容 |
+| --- | --- |
+| 函数名称 | `iec_status_t <prefix>_create(const iec_session_config_t *config, const void *protocol_config, const iec_transport_t *transport, const iec_callbacks_t *callbacks, iec_session_t **out_session)` |
+| 函数功能 | 创建会话对象，并拷贝公共配置、协议扩展配置、transport 和回调集合。 |
+| 入参 | `const iec_session_config_t *config`: 公共配置，定义超时、运行时选项和用户上下文。 |
+|  | `const void *protocol_config`: 协议扩展配置。运维101库应指向 `m101_master_config_t`；标准101库应指向 `iec101_master_config_t`；标准104库应指向 `iec104_master_config_t`。 |
+|  | `const iec_transport_t *transport`: 外部传输接口，协议库通过它收发明文协议帧。 |
+|  | `const iec_callbacks_t *callbacks`: 异步回调集合。创建成功后，库内部持有其副本。 |
+| 出参 | `iec_session_t **out_session`: 输出会话句柄地址。成功时写入新建会话对象。 |
+| 返回值 | `IEC_STATUS_OK`: 创建成功；失败返回其他错误码，详见返回码定义。 |
+| 异步回调 | 无。 |
+| 备注 | `<prefix>` 取 `m101`、`iec101` 或 `iec104`。`config`、`protocol_config`、`transport`、`callbacks` 和 `out_session` 均不能为空；成功时 `*out_session != NULL`。协议库不直接打开或持有串口/socket，只通过 transport 收发明文帧。 |
 
-#### iec_destroy
+#### <prefix>_destroy
 
-```c
-/**
- * @brief 销毁会话对象。
- *
- * 释放会话对象及其关联资源。
- * 支持在 `CREATED`、`STOPPED` 或 `FAULTED` 状态下调用。
- *
- * @param[in] session 待销毁的会话句柄。
- *
- * @return 销毁阶段的执行结果。
- * @retval IEC_STATUS_OK 销毁成功。
- *
- * @post 成功后 `session` 立即失效，调用方不得再次使用。
- * @note 停止流程由 `iec_stop` 承担，本函数仅负责资源释放。
- */
-iec_status_t iec_destroy(iec_session_t *session);
-```
+| 字段 | 内容 |
+| --- | --- |
+| 函数名称 | `iec_status_t <prefix>_destroy(iec_session_t *session)` |
+| 函数功能 | 销毁会话对象，释放会话对象及其关联资源。 |
+| 入参 | `iec_session_t *session`: 待销毁的会话句柄。 |
+| 出参 | 无。 |
+| 返回值 | `IEC_STATUS_OK`: 销毁成功；失败返回其他错误码，详见返回码定义。 |
+| 异步回调 | 无。 |
+| 备注 | 支持在 `CREATED`、`STOPPED` 或 `FAULTED` 状态下调用。成功后 `session` 立即失效，调用方不得再次使用。停止流程由 `<prefix>_stop` 承担。 |
 
-#### iec_get_protocol
+#### <prefix>_get_status
 
-```c
-/**
- * @brief 查询当前会话的协议类型。
- *
- * @param[in]  session      目标会话句柄。
- * @param[out] out_protocol 协议类型输出地址。成功时写入 `IEC_PROTOCOL_101`
- *                          或 `IEC_PROTOCOL_104`。
- *
- * @return 查询阶段的执行结果。
- * @retval IEC_STATUS_OK 查询成功。
- */
-iec_status_t iec_get_protocol(
-    const iec_session_t *session,
-    iec_protocol_t *out_protocol);
-```
+| 字段 | 内容 |
+| --- | --- |
+| 函数名称 | `iec_status_t <prefix>_get_status(const iec_session_t *session, iec_runtime_state_t *out_state)` |
+| 函数功能 | 查询当前会话运行状态。 |
+| 入参 | `const iec_session_t *session`: 目标会话句柄。 |
+| 出参 | `iec_runtime_state_t *out_state`: 运行状态输出地址。成功时写入当前生命周期状态。 |
+| 返回值 | `IEC_STATUS_OK`: 查询成功；失败返回其他错误码，详见返回码定义。 |
+| 异步回调 | 无。 |
+| 备注 | 本函数返回调用时刻的状态快照，不主动触发状态流转。 |
 
-#### iec_get_status
+#### <prefix>_set_option
 
-```c
-/**
- * @brief 查询当前运行状态。
- *
- * @param[in]  session   目标会话句柄。
- * @param[out] out_state 运行状态输出地址。成功时写入当前生命周期状态。
- *
- * @return 查询阶段的执行结果。
- * @retval IEC_STATUS_OK 查询成功。
- */
-iec_status_t iec_get_status(
-    const iec_session_t *session,
-    iec_runtime_state_t *out_state);
-```
+| 字段 | 内容 |
+| --- | --- |
+| 函数名称 | `iec_status_t <prefix>_set_option(iec_session_t *session, iec_option_t option, const void *value, uint32_t value_size)` |
+| 函数功能 | 修改运行时可变选项。 |
+| 入参 | `iec_session_t *session`: 目标会话句柄。 |
+|  | `iec_option_t option`: 选项标识，应从文档声明的可动态修改项中选择。 |
+|  | `const void *value`: 选项值缓冲区。 |
+|  | `uint32_t value_size`: `value` 对应的缓冲区大小。 |
+| 出参 | 无。 |
+| 返回值 | `IEC_STATUS_OK`: 修改成功；失败返回其他错误码，详见返回码定义。 |
+| 异步回调 | 无固定回调。部分选项修改会影响后续异步回调行为。 |
+| 备注 | `value` 和 `value_size` 由调用方提供，库内部会立即读取所需内容；调用返回后无需继续保持该缓冲区有效。 |
 
-#### iec_set_option
+#### <prefix>_start
 
-```c
-/**
- * @brief 修改运行时可变选项。
- *
- * @param[in] session    目标会话句柄。
- * @param[in] option     选项标识，应从文档声明的可动态修改项中选择。
- * @param[in] value      选项值缓冲区。
- * @param[in] value_size `value` 对应的缓冲区大小。
- *
- * @return 修改阶段的执行结果。
- * @retval IEC_STATUS_OK 修改成功。
- *
- * @note `value` 和 `value_size` 由调用方提供，库内部会立即读取所需内容，
- *       调用返回后无需继续保持该缓冲区有效。
- */
-iec_status_t iec_set_option(
-    iec_session_t *session,
-    iec_option_t option,
-    const void *value,
-    uint32_t value_size);
-```
+| 字段 | 内容 |
+| --- | --- |
+| 函数名称 | `iec_status_t <prefix>_start(iec_session_t *session)` |
+| 函数功能 | 启动协议会话，创建内部工作线程并开始协议流程。 |
+| 入参 | `iec_session_t *session`: 待启动的会话句柄。 |
+| 出参 | 无。 |
+| 返回值 | `IEC_STATUS_OK`: 启动请求已进入执行流程；失败返回其他错误码，详见返回码定义。 |
+| 异步回调 | `on_session_state`、`on_link_event`。 |
+| 备注 | 本函数不负责打开串口、不配置串口参数，也不主动创建 TCP 连接。协议库通过 create 阶段传入的 transport 收发明文协议帧。同步返回成功仅表示启动请求已被接受，最终运行状态通过异步回调体现。 |
 
-#### iec_get_option
+#### <prefix>_stop
 
-```c
-/**
- * @brief 查询运行时选项。
- *
- * @param[in]      session          目标会话句柄。
- * @param[in]      option           选项标识。
- * @param[out]     value            选项值输出缓冲区。
- * @param[in,out]  inout_value_size 输入输出大小参数。
- *                                  调用前写入缓冲区大小；
- *                                  调用后返回实际写入大小或所需大小。
- *
- * @return 查询阶段的执行结果。
- * @retval IEC_STATUS_OK 查询成功。
- */
-iec_status_t iec_get_option(
-    const iec_session_t *session,
-    iec_option_t option,
-    void *value,
-    uint32_t *inout_value_size);
-```
-
-#### iec_start
-
-```c
-/**
- * @brief 启动会话。
- *
- * 创建内部工作线程和 I/O 上下文。
- * 对 101 执行串口打开与主站建链；
- * 对 104 执行 TCP 主站建链或相应连接模式准备。
- *
- * @param[in] session 待启动的会话句柄。
- *
- * @return 启动阶段的执行结果。
- * @retval IEC_STATUS_OK 启动请求已进入执行流程。
- *
- * @note 返回成功仅表示启动请求已被接受，最终运行状态通过异步回调体现。
- */
-iec_status_t iec_start(iec_session_t *session);
-```
-
-#### iec_stop
-
-```c
-/**
- * @brief 停止会话。
- *
- * 请求会话退出并等待内部线程收敛。
- *
- * @param[in] session    待停止的会话句柄。
- * @param[in] timeout_ms 停止等待窗口，单位为毫秒。
- *
- * @return 停止阶段的执行结果。
- * @retval IEC_STATUS_OK      停止流程已完成。
- * @retval IEC_STATUS_TIMEOUT 等待窗口结束，但停止流程仍可能继续收敛。
- */
-iec_status_t iec_stop(
-    iec_session_t *session,
-    uint32_t timeout_ms);
-```
+| 字段 | 内容 |
+| --- | --- |
+| 函数名称 | `iec_status_t <prefix>_stop(iec_session_t *session, uint32_t timeout_ms)` |
+| 函数功能 | 请求会话退出并等待内部线程收敛。 |
+| 入参 | `iec_session_t *session`: 待停止的会话句柄。 |
+|  | `uint32_t timeout_ms`: 停止等待窗口，单位为毫秒。 |
+| 出参 | 无。 |
+| 返回值 | `IEC_STATUS_OK`: 停止流程已完成；`IEC_STATUS_TIMEOUT`: 等待窗口结束，但停止流程仍可能继续收敛；其他值为错误码。 |
+| 异步回调 | `on_session_state`。 |
+| 备注 | 本函数负责停止流程，句柄释放由 `<prefix>_destroy` 承担。 |
 
 行为约束如下：
 
-- `iec_create` 覆盖参数校验和对象初始化，物理连接、串口打开和工作线程启动由 `iec_start` 承担。
-- `iec_start` 成功返回表示启动请求已进入执行流程，链路建立结果由后续回调体现。
-- `iec_stop` 负责请求退出并等待线程收敛，句柄释放由 `iec_destroy` 承担。
-- `iec_destroy` 负责资源释放阶段。
+- `<prefix>_create` 覆盖参数校验、transport 绑定和对象初始化；串口/socket 打开、明文或安全传输选择由调用方在创建前完成。
+- `<prefix>_start` 成功返回表示启动请求已进入执行流程，链路建立结果由后续回调体现。
+- `<prefix>_stop` 负责请求退出并等待线程收敛，句柄释放由 `<prefix>_destroy` 承担。
+- `<prefix>_destroy` 负责资源释放阶段。
 
 ### 4.2 数据面、命令与旁路接口
 
-#### iec_general_interrogation
+#### <prefix>_general_interrogation
 
-```c
-/**
- * @brief 发起总召。
- *
- * @param[in] session 目标会话句柄。
- * @param[in] request 总召请求，描述目标公共地址和总召限定词。
- *
- * @return 请求提交阶段的执行结果。
- * @retval IEC_STATUS_OK 请求已进入发送流程。
- *
- * @note 成功返回仅表示请求已进入发送流程，后续数据通过点表回调异步返回。
- */
-iec_status_t iec_general_interrogation(
-    iec_session_t *session,
-    const iec_interrogation_request_t *request);
-```
+| 字段 | 内容 |
+| --- | --- |
+| 函数名称 | `iec_status_t <prefix>_general_interrogation(iec_session_t *session, const iec_interrogation_request_t *request)` |
+| 函数功能 | 发起总召。 |
+| 入参 | `iec_session_t *session`: 目标会话句柄。 |
+|  | `const iec_interrogation_request_t *request`: 总召请求，描述目标公共地址和总召限定词。 |
+| 出参 | 无。 |
+| 返回值 | `IEC_STATUS_OK`: 请求已进入发送流程；失败返回其他错误码，详见返回码定义。 |
+| 异步回调 | `on_point_indication`、`on_link_event`。 |
+| 备注 | 同步返回成功仅表示请求已进入发送流程，后续数据通过点表回调异步返回。 |
 
-#### iec_counter_interrogation
+#### <prefix>_counter_interrogation
 
-```c
-/**
- * @brief 发起电度量召唤。
- *
- * @param[in] session 目标会话句柄。
- * @param[in] request 电度量召唤请求，描述目标公共地址、召唤限定词和冻结语义。
- *
- * @return 请求提交阶段的执行结果。
- * @retval IEC_STATUS_OK 请求已进入发送流程。
- *
- * @note 成功返回仅表示请求已进入发送流程，后续结果通过异步回调体现。
- */
-iec_status_t iec_counter_interrogation(
-    iec_session_t *session,
-    const iec_counter_interrogation_request_t *request);
-```
+| 字段 | 内容 |
+| --- | --- |
+| 函数名称 | `iec_status_t <prefix>_counter_interrogation(iec_session_t *session, const iec_counter_interrogation_request_t *request)` |
+| 函数功能 | 发起电度量召唤。 |
+| 入参 | `iec_session_t *session`: 目标会话句柄。 |
+|  | `const iec_counter_interrogation_request_t *request`: 电度量召唤请求，描述目标公共地址、召唤限定词和冻结语义。 |
+| 出参 | 无。 |
+| 返回值 | `IEC_STATUS_OK`: 请求已进入发送流程；失败返回其他错误码，详见返回码定义。 |
+| 异步回调 | `on_point_indication`、`on_link_event`。 |
+| 备注 | 同步返回成功仅表示请求已进入发送流程，后续结果通过异步回调体现。 |
 
-#### iec_read_point
+#### <prefix>_read_point
 
-```c
-/**
- * @brief 按单点地址读取对象。
- *
- * @param[in] session 目标会话句柄。
- * @param[in] address 点位地址，采用协议原生地址建模，直接表达公共地址和信息体地址。
- *
- * @return 请求提交阶段的执行结果。
- * @retval IEC_STATUS_OK 请求已进入发送流程。
- *
- * @note 成功返回仅表示请求已进入发送流程，读取结果通过异步回调体现。
- */
-iec_status_t iec_read_point(
-    iec_session_t *session,
-    const iec_point_address_t *address);
-```
+| 字段 | 内容 |
+| --- | --- |
+| 函数名称 | `iec_status_t <prefix>_read_point(iec_session_t *session, const iec_point_address_t *address)` |
+| 函数功能 | 按单点地址读取对象。 |
+| 入参 | `iec_session_t *session`: 目标会话句柄。 |
+|  | `const iec_point_address_t *address`: 点位地址，采用协议原生地址建模，直接表达公共地址和信息体地址。 |
+| 出参 | 无。 |
+| 返回值 | `IEC_STATUS_OK`: 请求已进入发送流程；失败返回其他错误码，详见返回码定义。 |
+| 异步回调 | `on_point_indication`、`on_link_event`。 |
+| 备注 | 同步返回成功仅表示请求已进入发送流程，读取结果通过异步回调体现。 |
 
-#### iec_control_point
+#### <prefix>_control_point
 
-```c
-/**
- * @brief 下发控制命令或设定值命令。
- *
- * @param[in]  session        目标会话句柄。
- * @param[in]  request        命令请求，描述目标地址、命令类型、命令模式和命令值。
- * @param[out] out_command_id 命令 ID 输出地址。成功时由库生成，用于关联异步命令结果。
- *
- * @return 请求提交阶段的执行结果。
- * @retval IEC_STATUS_OK 请求已进入发送流程。
- *
- * @note 命令最终结果以 `on_command_result` 回调为准。
- */
-iec_status_t iec_control_point(
-    iec_session_t *session,
-    const iec_command_request_t *request,
-    uint32_t *out_command_id);
-```
+| 字段 | 内容 |
+| --- | --- |
+| 函数名称 | `iec_status_t <prefix>_control_point(iec_session_t *session, const iec_command_request_t *request, uint32_t *out_command_id)` |
+| 函数功能 | 下发控制命令或设定值命令。 |
+| 入参 | `iec_session_t *session`: 目标会话句柄。 |
+|  | `const iec_command_request_t *request`: 命令请求，描述目标地址、命令类型、命令模式和命令值。 |
+| 出参 | `uint32_t *out_command_id`: 命令 ID 输出地址。成功时由库生成，用于关联异步命令结果。 |
+| 返回值 | `IEC_STATUS_OK`: 请求已进入发送流程；失败返回其他错误码，详见返回码定义。 |
+| 异步回调 | `on_command_result`。 |
+| 备注 | 命令最终结果以 `on_command_result` 回调为准。 |
 
-#### iec_clock_sync
+#### <prefix>_clock_sync
 
-```c
-/**
- * @brief 发送校时命令。
- *
- * @param[in] session 目标会话句柄。
- * @param[in] request 校时请求，可指定固定时间戳，也可要求库在发送时自动采集系统时间。
- *
- * @return 请求提交阶段的执行结果。
- * @retval IEC_STATUS_OK 请求已进入发送流程。
- *
- * @note 成功返回仅表示请求已进入发送流程，后续状态主要通过链路事件或日志体现。
- */
-iec_status_t iec_clock_sync(
-    iec_session_t *session,
-    const iec_clock_sync_request_t *request);
-```
+| 字段 | 内容 |
+| --- | --- |
+| 函数名称 | `iec_status_t <prefix>_clock_sync(iec_session_t *session, const iec_clock_sync_request_t *request)` |
+| 函数功能 | 发送校时命令。 |
+| 入参 | `iec_session_t *session`: 目标会话句柄。 |
+|  | `const iec_clock_sync_request_t *request`: 校时请求，可指定固定时间戳，也可要求库在发送时自动采集系统时间。 |
+| 出参 | 无。 |
+| 返回值 | `IEC_STATUS_OK`: 请求已进入发送流程；失败返回其他错误码，详见返回码定义。 |
+| 异步回调 | `on_link_event`、`on_log`。 |
+| 备注 | 同步返回成功仅表示请求已进入发送流程，后续状态主要通过链路事件或日志体现。 |
 
-#### iec_send_raw_asdu
+#### <prefix>_send_raw_asdu
 
-```c
-/**
- * @brief 发送原始 ASDU。
- *
- * @param[in] session 目标会话句柄。
- * @param[in] request 原始 ASDU 发送请求，提供只读负载视图和旁路控制标志。
- *
- * @return 请求提交阶段的执行结果。
- * @retval IEC_STATUS_OK 请求已进入发送流程。
- *
- * @note 默认执行基础安全检查，`bypass_high_level_validation` 仅影响高层对象约束。
- * @note 后续报文观察结果可通过 `on_raw_asdu` 或 `on_link_event` 回调体现。
- */
-iec_status_t iec_send_raw_asdu(
-    iec_session_t *session,
-    const iec_raw_asdu_tx_t *request);
-```
+| 字段 | 内容 |
+| --- | --- |
+| 函数名称 | `iec_status_t <prefix>_send_raw_asdu(iec_session_t *session, const iec_raw_asdu_tx_t *request)` |
+| 函数功能 | 发送原始 ASDU。 |
+| 入参 | `iec_session_t *session`: 目标会话句柄。 |
+|  | `const iec_raw_asdu_tx_t *request`: 原始 ASDU 发送请求，提供只读负载视图和旁路控制标志。 |
+| 出参 | 无。 |
+| 返回值 | `IEC_STATUS_OK`: 请求已进入发送流程；失败返回其他错误码，详见返回码定义。 |
+| 异步回调 | `on_raw_asdu`、`on_link_event`。 |
+| 备注 | 默认执行基础协议合法性检查，`bypass_high_level_validation` 仅影响高层对象约束。后续报文观察结果可通过 `on_raw_asdu` 或 `on_link_event` 回调体现。 |
 
 行为约束如下：
 
 - 高层数据接口是主路径，点表对象通过 `on_point_indication` 返回。
-- `iec_control_point` 的最终结果以 `on_command_result` 为准。
+- `<prefix>_control_point` 的最终结果以 `on_command_result` 为准。
 - 原始 ASDU 旁路作为扩展和排障通道，与高层对象模型并行存在。
 
 ### 4.3 参数接口
 
-#### iec_get_device_description
+#### <prefix>_get_device_description
 
-```c
-/**
- * @brief 获取终端自描述内容。
- *
- * @param[in]  session        目标会话句柄。
- * @param[in]  request        自描述请求，描述目标公共地址、内容格式偏好和最大期望长度。
- * @param[out] out_request_id 请求 ID 输出地址。成功时由库生成，用于关联异步结果。
- *
- * @return 请求提交阶段的执行结果。
- * @retval IEC_STATUS_OK 请求已进入发送流程。
- *
- * @note 自描述内容通过 `on_device_description` 回调异步返回。
- */
-iec_status_t iec_get_device_description(
-    iec_session_t *session,
-    const iec_device_description_request_t *request,
-    uint32_t *out_request_id);
-```
+| 字段 | 内容 |
+| --- | --- |
+| 函数名称 | `iec_status_t <prefix>_get_device_description(iec_session_t *session, const iec_device_description_request_t *request, uint32_t *out_request_id)` |
+| 函数功能 | 获取终端自描述内容。 |
+| 入参 | `iec_session_t *session`: 目标会话句柄。 |
+|  | `const iec_device_description_request_t *request`: 自描述请求，描述目标公共地址、内容格式偏好和最大期望长度。 |
+| 出参 | `uint32_t *out_request_id`: 请求 ID 输出地址。成功时由库生成，用于关联异步结果。 |
+| 返回值 | `IEC_STATUS_OK`: 请求已进入发送流程；失败返回其他错误码，详见返回码定义。 |
+| 异步回调 | `on_device_description`。 |
+| 备注 | 自描述内容通过 `on_device_description` 回调异步返回。XML 或 msg 内容解析、缓存和界面生成由上层应用负责。 |
 
-#### iec_read_parameters
+#### <prefix>_read_parameters
 
-```c
-/**
- * @brief 读取参数。
- *
- * @param[in]  session        目标会话句柄。
- * @param[in]  request        参数读取请求，支持读取全部参数、按参数域读取、按分组读取或按地址范围读取。
- * @param[out] out_request_id 请求 ID 输出地址。成功时由库生成，用于关联异步结果。
- *
- * @return 请求提交阶段的执行结果。
- * @retval IEC_STATUS_OK 请求已进入发送流程。
- *
- * @note 读取结果通过 `on_parameter_indication` 回调分帧返回。
- */
-iec_status_t iec_read_parameters(
-    iec_session_t *session,
-    const iec_parameter_read_request_t *request,
-    uint32_t *out_request_id);
-```
+| 字段 | 内容 |
+| --- | --- |
+| 函数名称 | `iec_status_t <prefix>_read_parameters(iec_session_t *session, const iec_parameter_read_request_t *request, uint32_t *out_request_id)` |
+| 函数功能 | 读取参数。 |
+| 入参 | `iec_session_t *session`: 目标会话句柄。 |
+|  | `const iec_parameter_read_request_t *request`: 参数读取请求，支持读取全部参数、按参数域读取、按分组读取或按地址范围读取。 |
+| 出参 | `uint32_t *out_request_id`: 请求 ID 输出地址。成功时由库生成，用于关联异步结果。 |
+| 返回值 | `IEC_STATUS_OK`: 请求已进入发送流程；失败返回其他错误码，详见返回码定义。 |
+| 异步回调 | `on_parameter_indication`。 |
+| 备注 | 读取结果通过 `on_parameter_indication` 回调分帧返回。 |
 
-#### iec_write_parameters
+#### <prefix>_write_parameters
 
-```c
-/**
- * @brief 批量写入参数。
- *
- * @param[in]  session        目标会话句柄。
- * @param[in]  request        参数写入请求，提供目标定值区、参数数组和写后校验控制位。
- * @param[out] out_request_id 请求 ID 输出地址。成功时由库生成，用于关联异步结果。
- *
- * @return 请求提交阶段的执行结果。
- * @retval IEC_STATUS_OK 请求已进入发送流程。
- *
- * @note 写入最终结果以 `on_parameter_result` 回调为准。
- */
-iec_status_t iec_write_parameters(
-    iec_session_t *session,
-    const iec_parameter_write_request_t *request,
-    uint32_t *out_request_id);
-```
+| 字段 | 内容 |
+| --- | --- |
+| 函数名称 | `iec_status_t <prefix>_write_parameters(iec_session_t *session, const iec_parameter_write_request_t *request, uint32_t *out_request_id)` |
+| 函数功能 | 批量写入参数。 |
+| 入参 | `iec_session_t *session`: 目标会话句柄。 |
+|  | `const iec_parameter_write_request_t *request`: 参数写入请求，提供目标定值区、参数数组和写后校验控制位。 |
+| 出参 | `uint32_t *out_request_id`: 请求 ID 输出地址。成功时由库生成，用于关联异步结果。 |
+| 返回值 | `IEC_STATUS_OK`: 请求已进入发送流程；失败返回其他错误码，详见返回码定义。 |
+| 异步回调 | `on_parameter_result`；若启用写后校验，还可能触发 `on_parameter_indication`。 |
+| 备注 | 写入最终结果以 `on_parameter_result` 回调为准。`verify_after_write` 不代表同步返回时已经完成校验。 |
 
-#### iec_verify_parameters
+#### <prefix>_verify_parameters
 
-```c
-/**
- * @brief 发起参数回读校验。
- *
- * @param[in]  session        目标会话句柄。
- * @param[in]  request        参数校验请求，提供期望值数组和目标定值区。
- * @param[out] out_request_id 请求 ID 输出地址。成功时由库生成，用于关联异步结果。
- *
- * @return 请求提交阶段的执行结果。
- * @retval IEC_STATUS_OK 请求已进入发送流程。
- *
- * @note 校验过程中回读的参数值通过 `on_parameter_indication` 返回，校验结论通过
- *       `on_parameter_result` 返回。
- */
-iec_status_t iec_verify_parameters(
-    iec_session_t *session,
-    const iec_parameter_verify_request_t *request,
-    uint32_t *out_request_id);
-```
+| 字段 | 内容 |
+| --- | --- |
+| 函数名称 | `iec_status_t <prefix>_verify_parameters(iec_session_t *session, const iec_parameter_verify_request_t *request, uint32_t *out_request_id)` |
+| 函数功能 | 发起参数回读校验。 |
+| 入参 | `iec_session_t *session`: 目标会话句柄。 |
+|  | `const iec_parameter_verify_request_t *request`: 参数校验请求，提供期望值数组和目标定值区。 |
+| 出参 | `uint32_t *out_request_id`: 请求 ID 输出地址。成功时由库生成，用于关联异步结果。 |
+| 返回值 | `IEC_STATUS_OK`: 请求已进入发送流程；失败返回其他错误码，详见返回码定义。 |
+| 异步回调 | `on_parameter_indication`、`on_parameter_result`。 |
+| 备注 | 校验过程中回读的参数值通过 `on_parameter_indication` 返回，校验结论通过 `on_parameter_result` 返回。 |
 
-#### iec_switch_setting_group
+#### <prefix>_switch_setting_group
 
-```c
-/**
- * @brief 查询或切换定值区。
- *
- * @param[in]  session        目标会话句柄。
- * @param[in]  request        定值区请求，支持查询当前区和切换目标区。
- * @param[out] out_request_id 请求 ID 输出地址。成功时由库生成，用于关联异步结果。
- *
- * @return 请求提交阶段的执行结果。
- * @retval IEC_STATUS_OK 请求已进入发送流程。
- *
- * @note 结果通过 `on_parameter_result` 回调返回。
- */
-iec_status_t iec_switch_setting_group(
-    iec_session_t *session,
-    const iec_setting_group_request_t *request,
-    uint32_t *out_request_id);
-```
+| 字段 | 内容 |
+| --- | --- |
+| 函数名称 | `iec_status_t <prefix>_switch_setting_group(iec_session_t *session, const iec_setting_group_request_t *request, uint32_t *out_request_id)` |
+| 函数功能 | 查询或切换定值区。 |
+| 入参 | `iec_session_t *session`: 目标会话句柄。 |
+|  | `const iec_setting_group_request_t *request`: 定值区请求，支持查询当前区和切换目标区。 |
+| 出参 | `uint32_t *out_request_id`: 请求 ID 输出地址。成功时由库生成，用于关联异步结果。 |
+| 返回值 | `IEC_STATUS_OK`: 请求已进入发送流程；失败返回其他错误码，详见返回码定义。 |
+| 异步回调 | `on_parameter_result`。 |
+| 备注 | 本接口只建模当前区查询和切换动作，不在接口层扩展定值区批量管理策略。 |
 
 行为约束如下：
 
-- 参数读取、写入、校验和定值区管理均通过专用参数接口承载，不复用 `iec_read_point` 或 `iec_control_point`。
+- 参数读取、写入、校验和定值区管理均通过专用参数接口承载，不复用 `<prefix>_read_point` 或 `<prefix>_control_point`。
 - 参数模板导入导出由上层应用负责，动态库只负责参数对象和协议交互，不承担模板文件持久化职责。
-- `iec_write_parameters` 的 `verify_after_write` 只表示库在写入成功后继续发起回读校验，不代表同步返回时已经完成校验。
-- `iec_verify_parameters` 用于模板下发后的显式回读校验，也可用于上层对关键参数做抽查。
-- `iec_switch_setting_group` 只建模当前区查询和切换动作，不在接口层扩展定值区批量管理策略。
-- `iec_get_device_description` 负责从终端取回 XML 或 msg 自描述内容，解析、缓存和界面生成由上层应用负责。
+- `<prefix>_write_parameters` 的 `verify_after_write` 只表示库在写入成功后继续发起回读校验，不代表同步返回时已经完成校验。
+- `<prefix>_verify_parameters` 用于模板下发后的显式回读校验，也可用于上层对关键参数做抽查。
+- `<prefix>_switch_setting_group` 只建模当前区查询和切换动作，不在接口层扩展定值区批量管理策略。
+- `<prefix>_get_device_description` 负责从终端取回 XML 或 msg 自描述内容，解析、缓存和界面生成由上层应用负责。
 
 ### 4.4 文件接口
 
-#### iec_list_files
+#### <prefix>_list_files
 
-```c
-/**
- * @brief 召唤远端文件目录。
- *
- * @param[in]  session        目标会话句柄。
- * @param[in]  request        文件目录请求，描述目标公共地址、目录名和是否附带文件详情。
- * @param[out] out_request_id 请求 ID 输出地址。成功时由库生成，用于关联异步结果。
- *
- * @return 请求提交阶段的执行结果。
- * @retval IEC_STATUS_OK 请求已进入发送流程。
- *
- * @note 目录项通过 `on_file_list_indication` 分帧返回，目录请求最终结果通过
- *       `on_file_operation_result` 返回。
- */
-iec_status_t iec_list_files(
-    iec_session_t *session,
-    const iec_file_list_request_t *request,
-    uint32_t *out_request_id);
-```
+| 字段 | 内容 |
+| --- | --- |
+| 函数名称 | `iec_status_t <prefix>_list_files(iec_session_t *session, const iec_file_list_request_t *request, uint32_t *out_request_id)` |
+| 函数功能 | 召唤远端文件目录。 |
+| 入参 | `iec_session_t *session`: 目标会话句柄。 |
+|  | `const iec_file_list_request_t *request`: 文件目录请求，描述目标公共地址、目录名和是否附带文件详情。 |
+| 出参 | `uint32_t *out_request_id`: 请求 ID 输出地址。成功时由库生成，用于关联异步结果。 |
+| 返回值 | `IEC_STATUS_OK`: 请求已进入发送流程；失败返回其他错误码，详见返回码定义。 |
+| 异步回调 | `on_file_list_indication`、`on_file_operation_result`。 |
+| 备注 | 目录项通过 `on_file_list_indication` 分帧返回，目录请求最终结果通过 `on_file_operation_result` 返回。 |
 
-#### iec_read_file
+#### <prefix>_read_file
 
-```c
-/**
- * @brief 读取远端文件，支持按偏移断点续传。
- *
- * @param[in]  session         目标会话句柄。
- * @param[in]  request         文件读取请求，提供文件名、起始偏移和期望块大小。
- * @param[out] out_transfer_id 传输 ID 输出地址。成功时由库生成，用于关联进度与最终结果。
- *
- * @return 请求提交阶段的执行结果。
- * @retval IEC_STATUS_OK 请求已进入发送流程。
- *
- * @note 文件数据块通过 `on_file_data_indication` 回调返回，最终结果通过
- *       `on_file_operation_result` 回调返回。
- */
-iec_status_t iec_read_file(
-    iec_session_t *session,
-    const iec_file_read_request_t *request,
-    uint32_t *out_transfer_id);
-```
+| 字段 | 内容 |
+| --- | --- |
+| 函数名称 | `iec_status_t <prefix>_read_file(iec_session_t *session, const iec_file_read_request_t *request, uint32_t *out_transfer_id)` |
+| 函数功能 | 读取远端文件，支持按偏移断点续传。 |
+| 入参 | `iec_session_t *session`: 目标会话句柄。 |
+|  | `const iec_file_read_request_t *request`: 文件读取请求，提供文件名、起始偏移和期望块大小。 |
+| 出参 | `uint32_t *out_transfer_id`: 传输 ID 输出地址。成功时由库生成，用于关联进度与最终结果。 |
+| 返回值 | `IEC_STATUS_OK`: 请求已进入发送流程；失败返回其他错误码，详见返回码定义。 |
+| 异步回调 | `on_file_data_indication`、`on_file_operation_result`。 |
+| 备注 | 文件数据块通过 `on_file_data_indication` 回调返回，最终结果通过 `on_file_operation_result` 回调返回。 |
 
-#### iec_write_file
+#### <prefix>_write_file
 
-```c
-/**
- * @brief 写入远端文件，支持按偏移断点续传。
- *
- * @param[in]  session         目标会话句柄。
- * @param[in]  request         文件写入请求，提供目标文件名、总大小、起始偏移和待发送内容窗口。
- * @param[out] out_transfer_id 传输 ID 输出地址。成功时由库生成，用于关联状态与最终结果。
- *
- * @return 请求提交阶段的执行结果。
- * @retval IEC_STATUS_OK 请求已进入发送流程。
- *
- * @note `request->content` 与 `request->content_size` 描述本次待发送窗口。
- *       若需要断点续传，调用方可在后续重新发起 `iec_write_file`，
- *       并使用新的 `start_offset` 与剩余内容窗口。
- */
-iec_status_t iec_write_file(
-    iec_session_t *session,
-    const iec_file_write_request_t *request,
-    uint32_t *out_transfer_id);
-```
+| 字段 | 内容 |
+| --- | --- |
+| 函数名称 | `iec_status_t <prefix>_write_file(iec_session_t *session, const iec_file_write_request_t *request, uint32_t *out_transfer_id)` |
+| 函数功能 | 写入远端文件，支持按偏移断点续传。 |
+| 入参 | `iec_session_t *session`: 目标会话句柄。 |
+|  | `const iec_file_write_request_t *request`: 文件写入请求，提供目标文件名、总大小、起始偏移和待发送内容窗口。 |
+| 出参 | `uint32_t *out_transfer_id`: 传输 ID 输出地址。成功时由库生成，用于关联状态与最终结果。 |
+| 返回值 | `IEC_STATUS_OK`: 请求已进入发送流程；失败返回其他错误码，详见返回码定义。 |
+| 异步回调 | `on_file_operation_result`。 |
+| 备注 | `request->content` 与 `request->content_size` 描述本次待发送窗口。若需要断点续传，调用方可在后续重新发起 `<prefix>_write_file`，并使用新的 `start_offset` 与剩余内容窗口。 |
 
-#### iec_get_file_transfer_status
+#### <prefix>_get_file_transfer_status
 
-```c
-/**
- * @brief 查询文件传输状态快照。
- *
- * @param[in]  session      目标会话句柄。
- * @param[in]  transfer_id  传输 ID。
- * @param[out] out_status   文件传输状态输出地址。成功时写入当前本地状态视图。
- *
- * @return 查询阶段的执行结果。
- * @retval IEC_STATUS_OK 查询成功。
- *
- * @note 本函数返回库内维护的本地状态快照，不主动触发远端轮询。
- */
-iec_status_t iec_get_file_transfer_status(
-    const iec_session_t *session,
-    uint32_t transfer_id,
-    iec_file_transfer_status_t *out_status);
-```
+| 字段 | 内容 |
+| --- | --- |
+| 函数名称 | `iec_status_t <prefix>_get_file_transfer_status(const iec_session_t *session, uint32_t transfer_id, iec_file_transfer_status_t *out_status)` |
+| 函数功能 | 查询文件传输状态快照。 |
+| 入参 | `const iec_session_t *session`: 目标会话句柄。 |
+|  | `uint32_t transfer_id`: 传输 ID。 |
+| 出参 | `iec_file_transfer_status_t *out_status`: 文件传输状态输出地址。成功时写入当前本地状态视图。 |
+| 返回值 | `IEC_STATUS_OK`: 查询成功；失败返回其他错误码，详见返回码定义。 |
+| 异步回调 | 无。 |
+| 备注 | 本函数返回库内维护的本地状态快照，不主动触发远端轮询。 |
 
-#### iec_cancel_file_transfer
+#### <prefix>_cancel_file_transfer
 
-```c
-/**
- * @brief 请求取消当前文件传输。
- *
- * @param[in] session     目标会话句柄。
- * @param[in] transfer_id 传输 ID。
- *
- * @return 请求提交阶段的执行结果。
- * @retval IEC_STATUS_OK 取消请求已进入处理流程。
- *
- * @note 取消是否最终生效以 `on_file_operation_result` 回调为准。
- */
-iec_status_t iec_cancel_file_transfer(
-    iec_session_t *session,
-    uint32_t transfer_id);
-```
+| 字段 | 内容 |
+| --- | --- |
+| 函数名称 | `iec_status_t <prefix>_cancel_file_transfer(iec_session_t *session, uint32_t transfer_id)` |
+| 函数功能 | 请求取消当前文件传输。 |
+| 入参 | `iec_session_t *session`: 目标会话句柄。 |
+|  | `uint32_t transfer_id`: 传输 ID。 |
+| 出参 | 无。 |
+| 返回值 | `IEC_STATUS_OK`: 取消请求已进入处理流程；失败返回其他错误码，详见返回码定义。 |
+| 异步回调 | `on_file_operation_result`。 |
+| 备注 | 取消是否最终生效以 `on_file_operation_result` 回调为准。 |
 
 行为约束如下：
 
-- 文件目录、文件读取、文件写入和断点续传属于统一高层运维能力，不通过 `iec_send_raw_asdu` 直接暴露。
+- 文件目录、文件读取、文件写入和断点续传属于统一高层运维能力，不通过 `<prefix>_send_raw_asdu` 直接暴露。
 - `start_offset = 0` 表示首次完整传输；非零偏移表示调用方根据已确认偏移发起断点续传。
-- 当 `iec101_master_config_t.profile = IEC101_PROFILE_MAINTENANCE` 时，文件传输单块数据长度应按运维101的 `1024` 字节扩展上限建模；标准101场景仍应遵守传统 `255` 字节边界。
-- 若上层给出的 `max_chunk_size` 或 `preferred_chunk_size` 超过当前协议 profile 可承载上限，库内部应自动裁剪或分块，不要求调用方手工按帧拆分。
-- `iec_get_file_transfer_status` 只提供当前会话内可见的本地状态快照，适合外部轮询读取进度或恢复点。
+- 运维101库的文件传输单块数据长度应按运维101的 `1024` 字节扩展上限建模，同时不得超过 transport 的 `max_plain_frame_len`；标准101场景仍应遵守传统 `255` 字节边界。
+- 若上层给出的 `max_chunk_size` 或 `preferred_chunk_size` 超过当前协议库和 transport 可承载上限，库内部应自动裁剪或分块，不要求调用方手工按帧拆分。
+- `<prefix>_get_file_transfer_status` 只提供当前会话内可见的本地状态快照，适合外部轮询读取进度或恢复点。
 - 文件读写最终结果统一以 `on_file_operation_result` 为准；调用返回 `IEC_STATUS_OK` 仅表示请求已被受理。
 - 若对端返回否定确认、传送原因异常或厂商扩展错误，库应尽量填充 `iec_file_operation_result_t.cause_of_transmission`、`native_error_code` 和 `detail_message`，便于上层排障。
-- 文件接口与自描述接口并行存在；`iec_get_device_description` 仍负责终端模型文件的专用获取语义，不要求上层自行拼装文件传输报文。
+- 文件接口与自描述接口并行存在；`<prefix>_get_device_description` 仍负责终端模型文件的专用获取语义，不要求上层自行拼装文件传输报文。
 
 ## 5. 公共类型与回调
 
-### 5.1 协议、状态、返回码与运行时选项
+### 5.1 Transport、状态、返回码与运行时选项
 
 ```c
-typedef enum iec_protocol {
-    IEC_PROTOCOL_101 = 1, /* 101 主站会话 */
-    IEC_PROTOCOL_104 = 2  /* 104 主站会话 */
-} iec_protocol_t;
-
 typedef enum iec_runtime_state {
     IEC_RUNTIME_CREATED = 0,  /* create 完成, 等待启动 */
     IEC_RUNTIME_STARTING = 1, /* 正在启动链路和工作线程 */
@@ -723,20 +505,43 @@ typedef enum iec_option {
     IEC_OPTION_COMMAND_TIMEOUT_MS = 3,    /* 命令超时, 允许运行时修改 */
     IEC_OPTION_ENABLE_RAW_ASDU = 4        /* 是否启用原始 ASDU 旁路, 允许运行时修改 */
 } iec_option_t;
+
+typedef int (*iec_transport_send_fn)(
+    void *ctx,
+    const uint8_t *data,
+    uint32_t len,
+    uint32_t timeout_ms);
+
+typedef int (*iec_transport_recv_fn)(
+    void *ctx,
+    uint8_t *buffer,
+    uint32_t capacity,
+    uint32_t *out_len,
+    uint32_t timeout_ms);
+
+typedef struct iec_transport {
+    iec_transport_send_fn send;      /* 发送明文协议帧 */
+    iec_transport_recv_fn recv;      /* 接收明文协议帧 */
+    void *ctx;                       /* transport 私有上下文 */
+    uint32_t max_plain_frame_len;    /* 当前 transport 可接受的最大明文帧长度 */
+} iec_transport_t;
 ```
 
 协议建模约束如下：
 
-- 运维101场景仍归属于 `IEC_PROTOCOL_101`，不额外引入第三种公共协议枚举。
-- 若 `iec101_master_config_t.profile` 取 `IEC101_PROFILE_MAINTENANCE`，`iec_get_protocol` 仍返回 `IEC_PROTOCOL_101`。
+- 协议库只通过 `iec_transport_t` 收发明文协议帧，不解析串口路径、远端地址或端口。
+- 明文 transport 可直接读写串口/socket；安全 transport 可在内部调用安全接口库完成 EB 封装、加解密和真实收发。
+- `recv` 应向协议库返回一帧完整的明文协议帧；粘包、半包、EB 报文重组和安全解封装由 transport 实现处理。
+- `send` 和 `recv` 的返回值由 transport 实现定义；建议返回 `0` 表示成功，非 `0` 表示传输层错误，并通过日志或扩展诊断保留原始错误码。
+- `max_plain_frame_len` 必须小于等于 transport 在当前模式下可承载的明文协议帧上限；安全模式下应扣除 EB 头尾、MAC 和加密开销。
 
-以下参数在 `iec_create` 阶段确定：
+以下参数在 `<prefix>_create` 阶段确定：
 
-- 协议类型。
+- transport 函数表与上下文。
 - 回调集合。
 - 用户上下文指针。
-- 101 串口与链路层地址参数。
-- 104 远端地址、端口、超时和连接模式参数。
+- 101 链路层地址参数。
+- 104 K/W/T 超时和窗口参数。
 - 公共地址长度、信息体地址长度等协议建模参数。
 
 ### 5.2 点位地址与点值模型
@@ -1418,7 +1223,6 @@ typedef struct iec_callbacks {
 
 ```c
 typedef struct iec_session_config {
-    iec_protocol_t protocol;        /* 协议类型, 在创建阶段确定 */
     void *user_context;             /* 用户上下文, 回调原样透传 */
     uint32_t startup_timeout_ms;    /* 启动等待窗口 */
     uint32_t stop_timeout_ms;       /* 停止等待窗口 */
@@ -1432,39 +1236,21 @@ typedef struct iec_session_config {
 
 公共配置字段约束如下：
 
-- `protocol` 为必填。
 - `user_context` 透传给所有回调。
 - `startup_timeout_ms` 和 `stop_timeout_ms` 定义同步等待窗口。
 - `reconnect_interval_ms`、`command_timeout_ms`、`enable_raw_asdu` 允许运行时通过 `iec_set_option` 修改。
 - `command_timeout_ms` 同时作为命令类请求、参数类请求和文件类请求的缺省等待窗口。
 - `initial_log_level` 作为 `IEC_OPTION_LOG_LEVEL` 的初始值。
 
-### 6.2 IEC 101 扩展配置
+### 6.2 运维101 / IEC 101 扩展配置
 
 ```c
-typedef enum iec101_profile {
-    IEC101_PROFILE_STANDARD = 1,    /* 标准 101 */
-    IEC101_PROFILE_MAINTENANCE = 2  /* 运维 101 */
-} iec101_profile_t;
-
 typedef enum iec101_link_mode {
     IEC101_LINK_MODE_UNBALANCED = 1, /* 非平衡链路 */
     IEC101_LINK_MODE_BALANCED = 2    /* 平衡链路 */
 } iec101_link_mode_t;
 
-typedef enum iec101_parity {
-    IEC101_PARITY_NONE = 0, /* 无校验 */
-    IEC101_PARITY_EVEN = 1, /* 偶校验 */
-    IEC101_PARITY_ODD = 2   /* 奇校验 */
-} iec101_parity_t;
-
 typedef struct iec101_master_config {
-    iec101_profile_t profile;               /* 101 协议 profile */
-    const char *serial_device;                /* 串口设备路径 */
-    uint32_t baud_rate;                       /* 波特率 */
-    uint8_t data_bits;                        /* 数据位 */
-    uint8_t stop_bits;                        /* 停止位 */
-    uint8_t parity;                           /* 奇偶校验方式 */
     iec101_link_mode_t link_mode;             /* 链路模式 */
     uint16_t link_address;                    /* 对端链路地址 */
     uint8_t link_address_length;              /* 链路地址长度 */
@@ -1476,13 +1262,28 @@ typedef struct iec101_master_config {
     uint32_t repeat_timeout_ms;               /* 重发间隔 */
     uint32_t repeat_count;                    /* 最大重发次数 */
 } iec101_master_config_t;
+
+typedef struct m101_master_config {
+    iec101_link_mode_t link_mode;             /* 链路模式 */
+    uint16_t link_address;                    /* 对端链路地址 */
+    uint8_t link_address_length;              /* 链路地址长度 */
+    uint8_t common_address_length;            /* 公共地址长度 */
+    uint8_t information_object_address_length; /* 信息体地址长度 */
+    uint8_t cot_length;                       /* 传送原因长度 */
+    uint8_t use_single_char_ack;              /* 是否启用单字符确认 */
+    uint32_t ack_timeout_ms;                  /* 确认超时 */
+    uint32_t repeat_timeout_ms;               /* 重发间隔 */
+    uint32_t repeat_count;                    /* 最大重发次数 */
+    uint32_t preferred_file_chunk_size;        /* 运维文件传输建议明文分块大小 */
+} m101_master_config_t;
 ```
 
-101 扩展配置约束如下：
+101 / 运维101 扩展配置约束如下：
 
-- `profile` 用于区分标准 101 与运维 101；运维101文件能力是否可用由 `profile` 与终端能力共同决定。
-- 运维101 profile 在文件传输场景下支持将单块数据窗口从传统 `255` 字节扩展到 `1024` 字节；库内部应据此控制分块和续传偏移推进。
-- `serial_device`、`baud_rate`、`data_bits`、`stop_bits`、`parity` 为串口必填项。
+- 运维101和标准101由不同动态库承载，不再通过 `profile` 字段区分。
+- `iec101_master_config_t` 用于标准101库，`m101_master_config_t` 用于运维101库。
+- 运维101文件传输场景支持将单块数据窗口从传统 `255` 字节扩展到 `1024` 字节；实际发送块大小还必须小于等于 `iec_transport_t.max_plain_frame_len`。
+- 101 串口设备路径、波特率、数据位、停止位和奇偶校验由调用方或 transport 完成配置，不纳入协议扩展配置。
 - `link_mode` 默认建议取 `IEC101_LINK_MODE_UNBALANCED`。
 - `link_address_length`、`common_address_length`、`information_object_address_length`、`cot_length` 在创建阶段确定。
 - `ack_timeout_ms`、`repeat_timeout_ms`、`repeat_count` 作为创建期参数管理。
@@ -1490,18 +1291,7 @@ typedef struct iec101_master_config {
 ### 6.3 IEC 104 扩展配置
 
 ```c
-typedef enum iec104_connect_mode {
-    IEC104_CONNECT_MODE_ACTIVE = 1,  /* 主动连接远端 */
-    IEC104_CONNECT_MODE_PASSIVE = 2, /* 监听等待对端连接 */
-    IEC104_CONNECT_MODE_AUTO = 3     /* 由库按策略自动选择 */
-} iec104_connect_mode_t;
-
 typedef struct iec104_master_config {
-    const char *remote_host;                   /* 远端主机地址 */
-    uint16_t remote_port;                      /* 远端端口 */
-    uint16_t local_bind_port;                  /* 本地绑定端口 */
-    const char *local_bind_host;               /* 本地绑定地址 */
-    iec104_connect_mode_t connect_mode;        /* 连接模式 */
     uint8_t common_address_length;             /* 公共地址长度 */
     uint8_t information_object_address_length; /* 信息体地址长度 */
     uint8_t cot_length;                        /* 传送原因长度 */
@@ -1516,10 +1306,8 @@ typedef struct iec104_master_config {
 
 104 扩展配置约束如下：
 
-- `remote_host` 和 `remote_port` 用于主动连接场景。
-- `local_bind_host` 和 `local_bind_port` 提供监听或指定本地地址的扩展入口。
-- `connect_mode` 提供 `ACTIVE`、`PASSIVE`、`AUTO` 三种接口入口。
-- 当前实现完整覆盖 `ACTIVE` 模式，其他模式保留为兼容扩展入口，接入方可通过 `IEC_STATUS_UNSUPPORTED` 获得明确反馈。
+- TCP 远端地址、端口、本地绑定地址、连接模式和真实 socket 收发由调用方或 transport 处理，不纳入协议扩展配置。
+- `iec104_master_config_t` 只描述 104 协议字段长度和 K/W/T 参数，不携带平台 socket 句柄。
 - `k`、`w`、`t0_ms`、`t1_ms`、`t2_ms`、`t3_ms` 作为创建期参数管理。
 
 ### 6.4 协议专用辅助函数
@@ -1537,6 +1325,8 @@ typedef struct iec104_master_config {
  */
 iec_status_t iec101_validate_config(const iec101_master_config_t *config);
 
+iec_status_t m101_validate_config(const m101_master_config_t *config);
+
 /**
  * @brief 校验 104 扩展配置合法性。
  *
@@ -1545,7 +1335,7 @@ iec_status_t iec101_validate_config(const iec101_master_config_t *config);
  * @return 配置校验阶段的执行结果。
  * @retval IEC_STATUS_OK 配置静态校验通过。
  *
- * @note 本函数仅执行参数静态校验，不做地址解析，也不做连通性检查。
+ * @note 本函数仅执行参数静态校验，不做 socket 连通性检查。
  */
 iec_status_t iec104_validate_config(const iec104_master_config_t *config);
 ```
@@ -1553,17 +1343,17 @@ iec_status_t iec104_validate_config(const iec104_master_config_t *config);
 ### 6.5 参数、自描述与文件传输协议映射约定
 
 - 参数读取与参数写入统一映射到库内部参数通道，对上层保持协议无关；对接 101/104 时，库内部按 `TI=202`、`TI=203` 及对应传送原因完成封装和解析。
-- 当 `iec_read_parameters` 选择“读取全部参数”时，库内部应优先采用 `VSQ=0x00` 的整表读取语义，并在最终分帧到达后发出 `is_final = 1` 的参数回调。
+- 当 `<prefix>_read_parameters` 选择“读取全部参数”时，库内部应优先采用 `VSQ=0x00` 的整表读取语义，并在最终分帧到达后发出 `is_final = 1` 的参数回调。
 - 对于远程参数上送的结束判定，库内部应识别参数特征标识 `PI` 的后续状态位结束语义；上层只感知结构化参数事件，不直接感知原始字段。
-- `iec_switch_setting_group` 在接口层只表达“查询当前区”和“切换目标区”两类动作，具体采用的 101/104 过程或厂商扩展过程由库内部封装。
-- 当 `iec101_master_config_t.profile = IEC101_PROFILE_MAINTENANCE` 时，库内部可启用运维101专用文件目录、文件读写和升级类运维能力；标准101或104若目标终端不支持该能力，应返回明确的 `IEC_STATUS_UNSUPPORTED` 或异步结果码。
-- 运维101文件传输采用从 `255` 字节扩展到 `1024` 字节的单块数据窗口语义；若上层请求更大块大小，库应自动拆分为多个 `1024` 字节以内的发送或接收窗口。
+- `<prefix>_switch_setting_group` 在接口层只表达“查询当前区”和“切换目标区”两类动作，具体采用的 101/104 过程或厂商扩展过程由库内部封装。
+- 运维101库可启用运维101专用文件目录、文件读写和升级类运维能力；标准101或104若目标终端不支持该能力，应返回明确的 `IEC_STATUS_UNSUPPORTED` 或异步结果码。
+- 运维101文件传输采用从 `255` 字节扩展到 `1024` 字节的单块数据窗口语义；若上层请求更大块大小，库应自动拆分为多个 `1024` 字节以内且不超过 `iec_transport_t.max_plain_frame_len` 的发送或接收窗口。
 - 文件目录召唤通过统一文件通道返回 `iec_file_list_indication_t` 分帧结果，并以 `iec_file_operation_result_t` 作为目录请求最终结果。
 - 文件读取与文件写入统一采用 `start_offset` 断点语义；首次传输使用 `start_offset = 0`，续传使用最近已确认的 `next_offset` 或 `acknowledged_offset`。
-- `iec_get_file_transfer_status` 返回库内部维护的本地快照，适合外部轮询进度、恢复点和是否可续传状态，不要求上层自行跟踪协议分帧细节。
+- `<prefix>_get_file_transfer_status` 返回库内部维护的本地快照，适合外部轮询进度、恢复点和是否可续传状态，不要求上层自行跟踪协议分帧细节。
 - 文件类异步结果除 `result` 外，还应尽量回填原始 `cause_of_transmission`、底层错误码和诊断文本，用于表达“传送原因失败”“否定确认”“厂商拒绝”等细粒度失败原因。
-- `iec_get_device_description` 支持 XML 或 msg 自描述内容。库内部可通过专用文件传输通道或扩展 ASDU 通道获取，上层只接收最终的结构化内容视图。
-- 即使 `iec_get_device_description` 底层复用了文件传输通道，上层仍应优先使用专用自描述 API，而不是用通用文件 API 自行拼装终端模型文件读取过程。
+- `<prefix>_get_device_description` 支持 XML 或 msg 自描述内容。库内部可通过专用文件传输通道或扩展 ASDU 通道获取，上层只接收最终的结构化内容视图。
+- 即使 `<prefix>_get_device_description` 底层复用了文件传输通道，上层仍应优先使用专用自描述 API，而不是用通用文件 API 自行拼装终端模型文件读取过程。
 - 自描述文件建议控制在 64KB 以内。若终端返回分片内容，库内部负责重组，并通过 `iec_device_description_t.is_complete` 标记是否接收完成。
 
 ## 7. 最小调用流程
@@ -1573,27 +1363,29 @@ iec_status_t iec104_validate_config(const iec104_master_config_t *config);
 ```mermaid
 sequenceDiagram
     participant 应用 as 上层应用
+    participant 传输 as 明文transport
     participant 库 as 动态库
     participant 线程 as 工作线程
     participant 子站 as 101子站
     participant 回调 as 回调通道
 
-    应用->>库: iec_create(common, cfg101, cbs, &session)
+    应用->>传输: 打开串口并构造 plain transport
+    应用->>库: iec101_create(common, cfg101, transport, cbs, &session)
     库-->>应用: IEC_STATUS_OK + session
-    应用->>库: iec_start(session)
+    应用->>库: iec101_start(session)
     库->>回调: on_session_state(STARTING)
-    库->>线程: 创建工作线程并准备串口
+    库->>线程: 创建工作线程并绑定 transport
     线程->>回调: on_link_event(CONNECTING)
-    线程->>子站: 建立101链路
+    线程->>传输: 发送/接收明文101帧
+    传输->>子站: 通过串口发送/接收
     子站-->>线程: 链路确认/响应
     线程->>回调: on_link_event(CONNECTED)
     线程->>回调: on_session_state(RUNNING)
 ```
 
 ```c
-/* 公共配置: 定义协议类型、超时、重连策略和回调上下文。 */
+/* 公共配置: 定义超时、重连策略和回调上下文。 */
 iec_session_config_t common = {
-    .protocol = IEC_PROTOCOL_101,            /* 本会话选择 101 主站 */
     .user_context = app_ctx,                 /* 原样透传给所有回调 */
     .startup_timeout_ms = 3000,              /* 启动等待窗口 */
     .stop_timeout_ms = 3000,                 /* 停止等待窗口 */
@@ -1604,14 +1396,19 @@ iec_session_config_t common = {
     .initial_log_level = IEC_LOG_INFO        /* 日志初始等级 */
 };
 
-/* 101 扩展配置: 定义串口参数、链路模式和地址长度。 */
+/* Transport: 调用方先打开并配置串口，再提供明文帧收发函数。
+ * plain_serial_send/recv 内部可直接调用 Windows 串口 API 或平台适配层。
+ */
+plain_serial_ctx_t serial_ctx = app_open_configured_serial();
+iec_transport_t transport = {
+    .send = plain_serial_send,
+    .recv = plain_serial_recv,
+    .ctx = &serial_ctx,
+    .max_plain_frame_len = 255
+};
+
+/* 101 扩展配置: 只定义链路模式和地址长度。 */
 iec101_master_config_t cfg101 = {
-    .profile = IEC101_PROFILE_STANDARD,       /* 当前流程按标准 101 展开 */
-    .serial_device = "/dev/ttyS1",           /* 串口设备路径 */
-    .baud_rate = 9600,                       /* 波特率 */
-    .data_bits = 8,                          /* 数据位 */
-    .stop_bits = 1,                          /* 停止位 */
-    .parity = IEC101_PARITY_EVEN,            /* 奇偶校验方式 */
     .link_mode = IEC101_LINK_MODE_UNBALANCED, /* 链路模式 */
     .link_address = 1,                       /* 对端链路地址 */
     .link_address_length = 1,                /* 链路地址长度 */
@@ -1640,11 +1437,11 @@ iec_callbacks_t cbs = {
 /* 会话句柄由库分配, create 成功后由调用方持有。 */
 iec_session_t *session = NULL;
 
-/* create 完成参数校验和对象初始化，串口与链路在 start 阶段建立。 */
-iec_create(&common, &cfg101, &cbs, &session);
+/* create 完成参数校验、transport 绑定和对象初始化。 */
+iec101_create(&common, &cfg101, &transport, &cbs, &session);
 
-/* start 创建工作线程并进入 101 主站建链流程。 */
-iec_start(session);
+/* start 创建工作线程，并通过 transport 进入 101 主站建链流程。 */
+iec101_start(session);
 ```
 
 典型事件顺序如下：
@@ -1659,28 +1456,29 @@ iec_start(session);
 ```mermaid
 sequenceDiagram
     participant 应用 as 上层应用
+    participant 传输 as 明文transport
     participant 库 as 动态库
     participant 线程 as 工作线程
     participant 对端 as 104对端
     participant 回调 as 回调通道
 
-    应用->>库: iec_create(common, cfg104, cbs, &session)
+    应用->>传输: 建立 TCP socket 并构造 plain transport
+    应用->>库: iec104_create(common, cfg104, transport, cbs, &session)
     库-->>应用: IEC_STATUS_OK + session
-    应用->>库: iec_start(session)
+    应用->>库: iec104_start(session)
     库->>回调: on_session_state(STARTING)
-    库->>线程: 创建工作线程并进入ACTIVE建链
+    库->>线程: 创建工作线程并绑定 transport
     线程->>回调: on_link_event(CONNECTING)
-    线程->>对端: 发起TCP连接并建立104会话
-    对端-->>线程: 连接建立/链路响应
+    线程->>传输: 发送/接收明文104帧
+    传输->>对端: 通过 TCP socket 发送/接收
+    对端-->>线程: 104链路响应
     线程->>回调: on_link_event(CONNECTED)
     线程->>回调: on_session_state(RUNNING)
-    Note over 库,对端: PASSIVE/AUTO 作为兼容扩展入口保留
 ```
 
 ```c
 /* 公共配置: 104 与 101 共用同一套公共配置结构。 */
 iec_session_config_t common = {
-    .protocol = IEC_PROTOCOL_104,            /* 本会话选择 104 主站 */
     .user_context = app_ctx,                 /* 原样透传给所有回调 */
     .startup_timeout_ms = 5000,              /* 启动等待窗口 */
     .stop_timeout_ms = 3000,                 /* 停止等待窗口 */
@@ -1691,13 +1489,17 @@ iec_session_config_t common = {
     .initial_log_level = IEC_LOG_INFO        /* 日志初始等级 */
 };
 
-/* 104 扩展配置: 定义远端地址、端口和 K/W/T 参数。 */
+/* Transport: 调用方先建立 TCP socket，再提供明文帧收发函数。 */
+plain_tcp_ctx_t tcp_ctx = app_connect_tcp();
+iec_transport_t transport = {
+    .send = plain_tcp_send,
+    .recv = plain_tcp_recv,
+    .ctx = &tcp_ctx,
+    .max_plain_frame_len = 253
+};
+
+/* 104 扩展配置: 只定义协议字段长度和 K/W/T 参数。 */
 iec104_master_config_t cfg104 = {
-    .remote_host = "192.168.1.10",           /* 远端主机地址 */
-    .remote_port = 2404,                     /* 远端端口 */
-    .local_bind_port = 0,                    /* 本地绑定端口, 0 表示系统分配 */
-    .local_bind_host = NULL,                 /* 本地绑定地址, NULL 表示默认 */
-    .connect_mode = IEC104_CONNECT_MODE_ACTIVE, /* 当前流程按主动连接模式展开 */
     .common_address_length = 2,              /* 公共地址长度 */
     .information_object_address_length = 3,  /* 信息体地址长度 */
     .cot_length = 2,                         /* 传送原因长度 */
@@ -1724,15 +1526,56 @@ iec_callbacks_t cbs = {
 
 /* 句柄创建和启动流程与 101 保持一致。 */
 iec_session_t *session = NULL;
-iec_create(&common, &cfg104, &cbs, &session);
-iec_start(session);
+iec104_create(&common, &cfg104, &transport, &cbs, &session);
+iec104_start(session);
 ```
 
 说明如下：
 
-- `connect_mode` 提供 `ACTIVE`、`PASSIVE`、`AUTO` 三种接口入口，当前流程按 `ACTIVE` 模式展开。
-- 当前实现完整覆盖 `ACTIVE` 模式，其余模式保留为兼容扩展入口，并通过 `IEC_STATUS_UNSUPPORTED` 提供明确反馈。
+- TCP socket 的创建、主动连接、监听接入或本地绑定由调用方或 transport 完成，动态库只通过 transport 收发明文 104 帧。
 - 原始 ASDU 观察作为并行调试通道，与高层点表主路径协同工作。
+
+### 7.2.1 安全 transport 接入流程
+
+协议库不直接依赖电科院安全接口库。启用安全通信时，上位机或安全适配层先完成 USB Key、身份认证和运维密钥协商，再向协议库传入安全 transport。
+
+```mermaid
+sequenceDiagram
+    participant 应用 as 上层应用
+    participant 安全 as 安全适配层
+    participant 安全库 as 电科院安全接口库
+    participant 库 as 协议库
+    participant 终端 as 配电终端
+
+    应用->>安全: 打开USB Key并校验PIN
+    安全->>安全库: sec_lib_init
+    应用->>安全: 打开串口/socket
+    安全->>安全库: sec_auth_req / sec_auth_sign
+    安全->>终端: 发送认证EB报文
+    终端-->>安全: 返回认证结果EB报文
+    安全->>安全库: sec_handle_result
+    安全->>安全库: sec_keyexchange_req
+    安全->>终端: 发送密钥协商EB报文
+    终端-->>安全: 返回密钥协商结果EB报文
+    安全->>安全库: sec_handle_result
+    应用->>库: <prefix>_create(common, cfg, secure_transport, cbs, &session)
+    应用->>库: <prefix>_start(session)
+    库->>安全: transport.send(明文协议帧)
+    安全->>安全库: sec_encrypt_data
+    安全->>终端: 发送EB密文帧
+    终端-->>安全: 返回EB密文帧
+    安全->>安全库: sec_decrypt_data
+    安全-->>库: transport.recv返回明文协议帧
+```
+
+安全适配层约束如下：
+
+- 安全适配层负责调用最新版本的电科院安全接口库，协议库只感知 transport。
+- 每次身份认证成功后，安全适配层应执行运维密钥协商，再允许协议库启动业务流程。
+- 安全 transport 的 `send` 内部负责 `sec_encrypt_data` 和真实串口/socket 发送。
+- 安全 transport 的 `recv` 内部负责接收完整 EB 报文、调用 `sec_decrypt_data` 并返回明文协议帧。
+- 安全 transport 应将安全库原始错误码保留在诊断信息中，不应简单映射为协议错误。
+- 链路断开后，安全状态应失效；恢复业务前应重新建链、认证和密钥协商。
 
 ### 7.3 点表上报流程
 
@@ -1824,7 +1667,7 @@ sequenceDiagram
     participant 回调 as 参数回调
     participant 业务 as 业务线程/队列
 
-    应用->>库: iec_read_parameters(session, request, &request_id)
+    应用->>库: <prefix>_read_parameters(session, request, &request_id)
     库-->>应用: IEC_STATUS_OK + request_id
     库->>终端: 发起参数读取
     终端-->>库: 返回参数分帧
@@ -1848,7 +1691,7 @@ iec_parameter_read_request_t req = {
 };
 
 uint32_t request_id = 0;
-iec_read_parameters(session, &req, &request_id);
+iec101_read_parameters(session, &req, &request_id);
 
 static void on_parameter_indication(
     iec_session_t *session,
@@ -1885,7 +1728,7 @@ sequenceDiagram
     participant 终端 as 配电终端
     participant 回调 as 参数回调
 
-    应用->>库: iec_write_parameters(session, request, &request_id)
+    应用->>库: m101_write_parameters(session, request, &request_id)
     库-->>应用: IEC_STATUS_OK + request_id
     库->>终端: 下发参数写入请求
     终端-->>库: 参数写入确认
@@ -1923,7 +1766,7 @@ iec_parameter_write_request_t write_req = {
 };
 
 uint32_t request_id = 0;
-iec_write_parameters(session, &write_req, &request_id);
+m101_write_parameters(session, &write_req, &request_id);
 
 static void on_parameter_result(
     iec_session_t *session,
@@ -1948,7 +1791,7 @@ static void on_parameter_result(
 推荐处理步骤如下：
 
 1. 模板下发场景下建议始终开启 `verify_after_write`。
-2. 对重要参数可在写入完成后再次调用 `iec_verify_parameters` 做显式抽查。
+2. 对重要参数可在写入完成后再次调用 `m101_verify_parameters` 做显式抽查。
 3. 当出现 `VERIFY_MISMATCH` 时，应结合 `on_parameter_indication` 中的回读值做差异定位。
 
 ### 7.7 定值区切换流程
@@ -1960,11 +1803,11 @@ sequenceDiagram
     participant 终端 as 配电终端
     participant 回调 as 参数结果回调
 
-    应用->>库: iec_switch_setting_group(session, get_current, &req_id)
+    应用->>库: m101_switch_setting_group(session, get_current, &req_id)
     库->>终端: 查询当前定值区
     终端-->>库: 返回当前区号
     库->>回调: on_parameter_result(CURRENT_GROUP)
-    应用->>库: iec_switch_setting_group(session, switch_to_backup, &req_id)
+    应用->>库: m101_switch_setting_group(session, switch_to_backup, &req_id)
     库->>终端: 切换到目标定值区
     终端-->>库: 切区确认
     库->>回调: on_parameter_result(GROUP_SWITCHED)
@@ -1978,13 +1821,13 @@ iec_setting_group_request_t group_req = {
 };
 
 uint32_t group_request_id = 0;
-iec_switch_setting_group(session, &group_req, &group_request_id);
+m101_switch_setting_group(session, &group_req, &group_request_id);
 ```
 
 推荐处理步骤如下：
 
 1. 修改多定值区参数前，先查询当前区或显式执行切区。
-2. 切区成功后再发起 `iec_read_parameters` 或 `iec_write_parameters`，避免上层误操作到错误区。
+2. 切区成功后再发起 `m101_read_parameters` 或 `m101_write_parameters`，避免上层误操作到错误区。
 3. 对“当前区”和“目标区”的展示由上层根据 `request_id` 和结果码维护。
 
 ### 7.8 终端自描述获取流程
@@ -1997,7 +1840,7 @@ sequenceDiagram
     participant 回调 as 自描述回调
     participant 业务 as UI/模板层
 
-    应用->>库: iec_get_device_description(session, request, &request_id)
+    应用->>库: <prefix>_get_device_description(session, request, &request_id)
     库-->>应用: IEC_STATUS_OK + request_id
     库->>终端: 获取 XML/msg 自描述内容
     终端-->>库: 返回自描述分片
@@ -2014,7 +1857,7 @@ iec_device_description_request_t desc_req = {
 };
 
 uint32_t desc_request_id = 0;
-iec_get_device_description(session, &desc_req, &desc_request_id);
+iec101_get_device_description(session, &desc_req, &desc_request_id);
 
 static void on_device_description(
     iec_session_t *session,
@@ -2039,7 +1882,7 @@ static void on_device_description(
 
 ### 7.9 文件目录召唤流程
 
-以下流程以支持文件服务的终端为例；若目标终端或协议 profile 不支持该能力，库应返回明确的 `IEC_STATUS_UNSUPPORTED` 或异步结果码。
+以下流程以支持文件服务的终端为例；若目标协议库或终端能力不支持该能力，库应返回明确的 `IEC_STATUS_UNSUPPORTED` 或异步结果码。
 
 ```mermaid
 sequenceDiagram
@@ -2084,14 +1927,14 @@ sequenceDiagram
     participant 终端 as 配电终端
     participant 回调 as 文件数据回调
 
-    应用->>库: iec_read_file(session, start_offset=0, &transfer_id)
+    应用->>库: m101_read_file(session, start_offset=0, &transfer_id)
     库-->>应用: IEC_STATUS_OK + transfer_id
     库->>终端: 发起文件读取
     终端-->>库: 返回文件分块
     库->>回调: on_file_data_indication(next_offset)
     Note over 应用,库: 链路中断后查询本地状态快照
-    应用->>库: iec_get_file_transfer_status(session, transfer_id, &status)
-    应用->>库: iec_read_file(session, start_offset=status.acknowledged_offset, &new_transfer_id)
+    应用->>库: m101_get_file_transfer_status(session, transfer_id, &status)
+    应用->>库: m101_read_file(session, start_offset=status.acknowledged_offset, &new_transfer_id)
     库->>回调: on_file_operation_result(READ, COMPLETED)
 ```
 
@@ -2106,7 +1949,7 @@ iec_file_read_request_t read_req = {
 };
 
 uint32_t read_transfer_id = 0;
-iec_read_file(session, &read_req, &read_transfer_id);
+m101_read_file(session, &read_req, &read_transfer_id);
 
 static void on_file_data_indication(
     iec_session_t *session,
@@ -2121,10 +1964,10 @@ static void on_file_data_indication(
 }
 
 iec_file_transfer_status_t read_status;
-iec_get_file_transfer_status(session, read_transfer_id, &read_status);
+m101_get_file_transfer_status(session, read_transfer_id, &read_status);
 if (read_status.is_resumable) {
     read_req.start_offset = read_status.acknowledged_offset;
-    iec_read_file(session, &read_req, &read_transfer_id);
+    m101_read_file(session, &read_req, &read_transfer_id);
 }
 ```
 
@@ -2136,7 +1979,7 @@ if (read_status.is_resumable) {
 
 ### 7.11 文件写入与断点续传流程
 
-以下流程以 `iec101_master_config_t.profile = IEC101_PROFILE_MAINTENANCE` 为例，展示如何向终端写入文件并按已确认偏移续传。
+以下流程以运维101库为例，展示如何向终端写入文件并按已确认偏移续传。
 
 ```mermaid
 sequenceDiagram
@@ -2145,13 +1988,13 @@ sequenceDiagram
     participant 终端 as 配电终端
     participant 回调 as 文件结果回调
 
-    应用->>库: iec_write_file(session, start_offset=0, &transfer_id)
+    应用->>库: m101_write_file(session, start_offset=0, &transfer_id)
     库-->>应用: IEC_STATUS_OK + transfer_id
     库->>终端: 分块发送文件内容
     终端-->>库: 返回写入确认
     Note over 应用,库: 若链路中断, 查询已确认偏移
-    应用->>库: iec_get_file_transfer_status(session, transfer_id, &status)
-    应用->>库: iec_write_file(session, start_offset=status.acknowledged_offset, &new_transfer_id)
+    应用->>库: m101_get_file_transfer_status(session, transfer_id, &status)
+    应用->>库: m101_write_file(session, start_offset=status.acknowledged_offset, &new_transfer_id)
     库->>回调: on_file_operation_result(WRITE, COMPLETED)
 ```
 
@@ -2172,15 +2015,15 @@ iec_file_write_request_t write_req = {
 };
 
 uint32_t write_transfer_id = 0;
-iec_write_file(session, &write_req, &write_transfer_id);
+m101_write_file(session, &write_req, &write_transfer_id);
 
 iec_file_transfer_status_t write_status;
-iec_get_file_transfer_status(session, write_transfer_id, &write_status);
+m101_get_file_transfer_status(session, write_transfer_id, &write_status);
 if (write_status.is_resumable && write_status.acknowledged_offset < image_size) {
     write_req.start_offset = write_status.acknowledged_offset;
     write_req.content = image + write_status.acknowledged_offset;
     write_req.content_size = image_size - write_status.acknowledged_offset;
-    iec_write_file(session, &write_req, &write_transfer_id);
+    m101_write_file(session, &write_req, &write_transfer_id);
 }
 ```
 
@@ -2195,9 +2038,9 @@ if (write_status.is_resumable && write_status.acknowledged_offset < image_size) 
 
 ### 8.1 生命周期约束
 
-- `iec_create` 成功后会话状态为 `IEC_RUNTIME_CREATED`。
-- `iec_start` 触发状态流转 `CREATED -> STARTING -> RUNNING`。
-- `iec_stop` 触发状态流转 `RUNNING -> STOPPING -> STOPPED`。
+- `<prefix>_create` 成功后会话状态为 `IEC_RUNTIME_CREATED`。
+- `<prefix>_start` 触发状态流转 `CREATED -> STARTING -> RUNNING`。
+- `<prefix>_stop` 触发状态流转 `RUNNING -> STOPPING -> STOPPED`。
 - 运行过程中遇到严重不可恢复异常时，会话可进入 `IEC_RUNTIME_FAULTED`。
 
 ### 8.2 C 接口与内存所有权约束
@@ -2205,8 +2048,9 @@ if (write_status.is_resumable && write_status.acknowledged_offset < image_size) 
 - 所有导出函数使用 C ABI。
 - `iec_session_t` 为 opaque handle，禁止用户栈上构造或复制。
 - 公共结构体直接按头文件定义传递，调用方与动态库应基于同一版本头文件编译。
-- 用户传入 `iec_create` 的配置结构体和回调结构体，在函数返回后可释放，动态库内部应完成必要拷贝。
-- 用户传入的字符串参数在 `iec_create` 返回前必须有效，返回后是否长期保留由库内部拷贝决定。
+- 用户传入 `<prefix>_create` 的配置结构体、协议配置、transport 和回调结构体，在函数返回后可释放，动态库内部应完成必要拷贝。
+- `iec_transport_t.ctx` 指向的上下文和真实通信资源必须在会话运行期间保持有效；资源打开、关闭和所有权由 transport 提供方负责。
+- 用户传入的字符串参数在对应 API 返回前必须有效，返回后是否长期保留由库内部拷贝决定。
 - 回调收到的事件数据由动态库持有，在回调执行窗口内供调用方读取和拷贝。
 - 文件写入请求中的 `content` 只表达本次待发送窗口；调用方可选择一次性提供完整内容，也可在续传场景下提供剩余窗口。
 - 接口返回模式统一采用调用方缓冲区和回调只读视图。
@@ -2244,10 +2088,10 @@ if (write_status.is_resumable && write_status.acknowledged_offset < image_size) 
 
 - 高层点表接口是默认主路径，业务系统应优先依赖 `on_point_indication`。
 - 参数接口是独立主路径，参数读取和参数写入不应通过点表接口或遥控接口拼装实现。
-- 文件接口是独立主路径，目录召唤、文件传输和断点续传不应通过 `iec_send_raw_asdu` 或自定义旁路报文暴露给上层。
+- 文件接口是独立主路径，目录召唤、文件传输和断点续传不应通过 `<prefix>_send_raw_asdu` 或自定义旁路报文暴露给上层。
 - 原始 ASDU 旁路作为调试抓包、扩展报文观察和受控透传通道。
 - 即使开启原始 ASDU 旁路，高层解码成功的报文仍继续生成高层事件。
-- `bypass_high_level_validation` 作用于高层对象约束，底层安全检查保持有效。
+- `bypass_high_level_validation` 作用于高层对象约束，协议帧基础合法性检查保持有效。
 
 ### 8.5 参数与文件接口边界
 
@@ -2257,22 +2101,22 @@ if (write_status.is_resumable && write_status.acknowledged_offset < image_size) 
 - 本地文件的落盘、缓存目录管理、升级包来源校验和断点内容持久化由上层应用负责，不纳入动态库职责范围。
 - 自描述内容的 XML 或 msg 解析、参数分组展示、界面控件生成和参数变更审计由上层应用负责。
 - 无线模块、电源模块、线损模块在接口层统一视为参数域，避免为具体业务模块重复设计函数族。
-- `iec_read_point` 适合点表对象读取，不负责表达“读取全部运行参数”“读取某定值区全部参数”这类参数语义。
-- `iec_control_point` 适合遥控和设定值命令，不承担模板下发、参数批量写入和回读校验职责。
-- 通用文件 API 负责目录、数据块和续传偏移等高层文件语义；`iec_get_device_description` 继续承担终端模型文件的专用获取入口。
+- `<prefix>_read_point` 适合点表对象读取，不负责表达“读取全部运行参数”“读取某定值区全部参数”这类参数语义。
+- `<prefix>_control_point` 适合遥控和设定值命令，不承担模板下发、参数批量写入和回读校验职责。
+- 通用文件 API 负责目录、数据块和续传偏移等高层文件语义；`<prefix>_get_device_description` 继续承担终端模型文件的专用获取入口。
 
 ## 9. 头文件组织建议
 
 建议对外头文件按以下方式拆分：
 
 - `include/iec/iec_types.h`
-- `include/iec/iec_api.h`
+- `include/iec/m101_api.h`
 - `include/iec/iec101_api.h`
 - `include/iec/iec104_api.h`
 
 建议组织原则如下：
 
-- `iec_types.h` 放公共枚举、结构体、参数对象、文件对象和回调类型。
-- `iec_api.h` 放公共生命周期、运行控制、数据面接口、参数接口和文件接口。
-- `iec101_api.h` 放 101 扩展配置、profile 枚举、校验函数和未来专用能力。
-- `iec104_api.h` 放 104 扩展配置、校验函数和未来专用能力。
+- `iec_types.h` 放公共枚举、结构体、transport、参数对象、文件对象和回调类型。
+- `m101_api.h` 放运维101导出函数、扩展配置、校验函数和未来专用能力。
+- `iec101_api.h` 放标准101导出函数、扩展配置、校验函数和未来专用能力。
+- `iec104_api.h` 放标准104导出函数、扩展配置、校验函数和未来专用能力。
