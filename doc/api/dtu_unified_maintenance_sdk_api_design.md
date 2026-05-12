@@ -34,7 +34,19 @@
 
 ## 3. API 总览
 
-### 3.1 设计总原则
+### 3.1 整体架构与职责边界
+
+![配电终端统一运维协议层 SDK 整体架构](../generated/dtu_sdk_overall_architecture.png)
+
+上图用于说明协议层 SDK 在统一运维工具中的位置和边界。图中的模块划分表达职责归属，不要求所有模块必须拆成独立进程或独立动态库。
+
+- 上层运维工具负责人机交互、业务流程编排、权限闭锁、升级包可信验签、审计记录和证书授权管理入口。
+- 协议层 SDK 是本文档的核心交付，负责三套同步动态库、公共 C ABI、协议对象建模、报文编解码、状态机推进、文件与升级流程以及统一异步结果回调。
+- 传输与安全适配由调用方或集成侧实现，负责打开串口/socket、封装 `iec_transport_t`、调用安全接口库、完成安全认证和 EB 加解密，并向 SDK 暴露明文协议帧收发接口。
+- 安全接口库和配电终端作为外部依赖或对端展示。SDK 不直接调用 `sec_*`、`SG_*` 等安全库接口，也不直接管理终端侧通信资源。
+- 安全适配与配电终端之间的实际承载仍为运维101、IEC101 或 IEC104；报文监视由上层工具调用 SDK 或适配层能力实现，不作为协议层 SDK 直接对外暴露的独立外部主体。
+
+### 3.2 设计总原则
 
 - 三套协议库分别导出带协议前缀的函数集，不通过统一函数表分发。
 - 公共类型负责生命周期、运行控制、点表事件、命令、旁路和统一错误语义。
@@ -53,7 +65,7 @@
 | `dtu_iec101.dll` | 标准 IEC 60870-5-101 主站协议库 | `iec101_` | `iec101_master_config_t` |
 | `dtu_iec104.dll` | 标准 IEC 60870-5-104 主站协议库 | `iec104_` | `iec104_master_config_t` |
 
-### 3.2 核心函数总表
+### 3.3 核心函数总表
 
 以下为三套协议库保持同形的核心函数族。表中使用 `<prefix>` 表示协议前缀：运维101 为 `m101`，标准101 为 `iec101`，标准104 为 `iec104`。当目标协议或终端能力不支持某项运维能力时，动态库应返回明确的 `IEC_STATUS_UNSUPPORTED` 或异步结果码。
 
@@ -61,14 +73,14 @@
 | --- | --- | --- | --- | --- |
 | `<prefix>_create` | 创建会话对象并拷贝配置 | 公共配置、协议扩展配置、transport、回调集合 | 表示会话对象初始化阶段是否完成 | 无 |
 | `<prefix>_destroy` | 销毁会话对象 | 会话句柄 | 表示资源释放阶段是否完成 | 无 |
-| `<prefix>_get_status` | 查询当前运行状态 | 会话句柄 | 是否成功写出状态枚举 | 无 |
+| `<prefix>_get_runtime_state` | 查询当前会话生命周期状态 | 会话句柄 | 是否成功写出状态枚举 | 无 |
 | `<prefix>_set_option` | 修改允许运行时变更的选项 | 选项枚举、值缓冲区 | 是否成功接受配置更新 | 部分改动会影响后续回调行为 |
 | `<prefix>_start` | 启动工作线程并进入协议会话流程 | 会话句柄 | 启动请求是否被接受 | `on_session_state`、`on_link_event` |
 | `<prefix>_stop` | 请求停止并等待会话退出 | 会话句柄、停止超时 | 停止请求是否完成 | `on_session_state` |
 | `<prefix>_general_interrogation` | 发起总召 | 总召请求结构体 | 请求是否被接受 | `on_point_indication`、`on_link_event` |
 | `<prefix>_counter_interrogation` | 发起电度量召唤 | 电度量召唤请求结构体 | 请求是否被接受 | `on_point_indication`、`on_link_event` |
 | `<prefix>_read_point` | 按地址读取单个对象 | 点位地址 | 请求是否被接受 | `on_point_indication`、`on_link_event` |
-| `<prefix>_control_point` | 下发遥控或设定值命令 | 命令请求结构体 | 请求是否被接受并生成命令 ID | `on_command_result` |
+| `<prefix>_control_point` | 下发遥控、设定值或扩展运维遥控命令 | 命令请求结构体 | 请求是否被接受并生成命令 ID | `on_command_result` |
 | `<prefix>_get_device_description` | 获取终端自描述内容 | 自描述请求结构体 | 请求是否被接受并生成请求 ID | `on_device_description` |
 | `<prefix>_read_parameters` | 读取参数或参数分组 | 参数读取请求结构体 | 请求是否被接受并生成请求 ID | `on_parameter_indication` |
 | `<prefix>_write_parameters` | 批量写入参数 | 参数写入请求结构体 | 请求是否被接受并生成请求 ID | `on_parameter_result` |
@@ -79,10 +91,13 @@
 | `<prefix>_write_file` | 写入远端文件，支持按偏移续传 | 文件写入请求结构体 | 请求是否被接受并生成传输 ID | `on_file_operation_result` |
 | `<prefix>_get_file_transfer_status` | 查询文件传输本地状态快照 | 传输 ID | 是否成功写出当前状态视图 | 无 |
 | `<prefix>_cancel_file_transfer` | 请求取消进行中的文件传输 | 传输 ID | 取消请求是否被接受 | `on_file_operation_result` |
-| `<prefix>_clock_sync` | 发送校时命令 | 校时请求结构体 | 请求是否被接受 | `on_link_event`、日志回调 |
+| `<prefix>_upgrade_firmware` | 启动程序升级状态机 | 升级请求结构体 | 请求是否被接受并生成升级 ID | `on_upgrade_progress`、`on_upgrade_result` |
+| `<prefix>_cancel_upgrade` | 请求取消程序升级 | 升级 ID | 取消请求是否被接受 | `on_upgrade_progress`、`on_upgrade_result` |
+| `<prefix>_clock_sync` | 发送校时命令 | 校时请求结构体 | 请求是否被接受并生成请求 ID | `on_clock_result` |
+| `<prefix>_read_clock` | 读取终端当前时间 | 时钟读取请求结构体 | 请求是否被接受并生成请求 ID | `on_clock_result` |
 | `<prefix>_send_raw_asdu` | 主动透传原始 ASDU | 原始发送请求结构体 | 请求是否被接受 | `on_raw_asdu`、`on_link_event` |
 
-### 3.3 关键回调总表
+### 3.4 关键回调总表
 
 | 回调 | 触发时机 | 主要用途 | 线程语义 |
 | --- | --- | --- | --- |
@@ -94,21 +109,24 @@
 | `on_file_list_indication` | 收到文件目录分帧结果时 | 接收目录项并构建远端文件视图 | 由库内工作线程触发 |
 | `on_file_data_indication` | 收到文件读取数据块时 | 接收文件块、推进偏移并支撑断点续传 | 由库内工作线程触发 |
 | `on_file_operation_result` | 文件目录、文件读写或取消完成时 | 获取文件类请求的最终结果 | 由库内工作线程触发 |
+| `on_upgrade_progress` | 程序升级阶段或进度变化时 | 获取升级启动、执行、传输、结束等阶段进度 | 由库内工作线程触发 |
+| `on_upgrade_result` | 程序升级完成、失败或取消时 | 获取升级最终结果和诊断信息 | 由库内工作线程触发 |
+| `on_clock_result` | 校时或时钟读取完成时 | 获取校时确认、终端当前时间或失败诊断 | 由库内工作线程触发 |
 | `on_parameter_indication` | 收到参数读取结果时 | 接收参数值和可选参数描述信息 | 由库内工作线程触发 |
 | `on_parameter_result` | 参数写入、校验、切区完成时 | 获取参数类请求的最终结果 | 由库内工作线程触发 |
 | `on_raw_asdu` | 启用旁路且收发原始 ASDU 时 | 调试抓包、特殊报文透传 | 由库内工作线程触发 |
 | `on_log` | 产生日志时 | 联调、排障和接入监控 | 由库内工作线程触发 |
 
-### 3.4 关键结构体总表
+### 3.5 关键结构体总表
 
 | 结构体 | 作用 | 关键字段 |
 | --- | --- | --- |
 | `iec_session_config_t` | 公共配置 | 超时、重连间隔、日志等级、`user_context` |
 | `iec_transport_t` | 外部传输接口 | 明文帧发送函数、明文帧接收函数、上下文、最大明文帧长 |
-| `iec_callbacks_t` | 回调集合 | 状态、链路、点表、命令、自描述、文件目录、文件数据、文件结果、参数、原始 ASDU、日志回调 |
+| `iec_callbacks_t` | 回调集合 | 状态、链路、点表、命令、自描述、文件目录、文件数据、文件结果、升级、时钟、参数、原始 ASDU、日志回调 |
 | `iec_point_address_t` | 协议原生地址 | 公共地址、信息体地址、类型标识、传送原因 |
 | `iec_point_value_t` | 高层点值 | 点值类型、质量位、时间戳、实际数据 |
-| `iec_command_request_t` | 控制命令 | 目标地址、命令类型、命令模式、命令值 |
+| `iec_command_request_t` | 控制命令 | 目标地址、命令类型、命令语义、命令模式、命令值 |
 | `iec_parameter_item_t` | 单个参数值对象 | 参数 ID、地址、参数域、值类型、当前值 |
 | `iec_parameter_descriptor_t` | 参数元数据 | 名称、分组、范围、缺省值、模板/校验能力 |
 | `iec_parameter_read_request_t` | 参数读取请求 | 读取模式、参数域、地址范围、定值区 |
@@ -122,12 +140,17 @@
 | `iec_file_data_indication_t` | 文件数据块事件 | 当前偏移、下一偏移、数据块视图 |
 | `iec_file_transfer_status_t` | 文件传输状态快照 | 传输方向、状态、已确认偏移、是否可续传、最近一次底层错误信息 |
 | `iec_file_operation_result_t` | 文件操作结果 | 操作类型、结果码、最终偏移、总大小、协议诊断细节 |
+| `iec_upgrade_request_t` | 程序升级请求 | 远端文件位置、升级包大小、分块读取回调、分块大小、诊断校验文本 |
+| `iec_upgrade_progress_t` | 程序升级进度 | 升级阶段、已传输字节数、总大小、关联文件传输 ID |
+| `iec_upgrade_result_t` | 程序升级结果 | 结果码、最终阶段、已传输字节数、协议诊断细节 |
+| `iec_clock_read_request_t` | 时钟读取请求 | 公共地址 |
+| `iec_clock_result_t` | 时钟命令结果 | 操作类型、结果码、终端时标、协议诊断细节 |
 | `iec_raw_asdu_event_t` | 原始报文事件 | 收发方向、类型标识、公共地址、载荷视图 |
 | `m101_master_config_t` | 运维101 扩展配置 | 链路地址、字段长度、重发参数、运维文件能力约束 |
 | `iec101_master_config_t` | 标准101 扩展配置 | 链路地址、字段长度、重发参数 |
 | `iec104_master_config_t` | 104 扩展配置 | 地址字段长度、K/W/T 参数 |
 
-### 3.5 对外句柄与头文件骨架
+### 3.6 对外句柄与头文件骨架
 
 ```c
 #ifdef __cplusplus
@@ -173,17 +196,17 @@ typedef struct iec_session iec_session_t;
 | 异步回调 | 无。 |
 | 备注 | 支持在 `CREATED`、`STOPPED` 或 `FAULTED` 状态下调用。成功后 `session` 立即失效，调用方不得再次使用。停止流程由 `<prefix>_stop` 承担。 |
 
-#### <prefix>_get_status
+#### <prefix>_get_runtime_state
 
 | 字段 | 内容 |
 | --- | --- |
-| 函数名称 | `iec_status_t <prefix>_get_status(const iec_session_t *session, iec_runtime_state_t *out_state)` |
-| 函数功能 | 查询当前会话运行状态。 |
+| 函数名称 | `iec_status_t <prefix>_get_runtime_state(const iec_session_t *session, iec_runtime_state_t *out_state)` |
+| 函数功能 | 查询当前会话生命周期状态。 |
 | 入参 | `const iec_session_t *session`: 目标会话句柄。 |
-| 出参 | `iec_runtime_state_t *out_state`: 运行状态输出地址。成功时写入当前生命周期状态。 |
+| 出参 | `iec_runtime_state_t *out_state`: 生命周期状态输出地址。成功时写入当前生命周期状态。 |
 | 返回值 | `IEC_STATUS_OK`: 查询成功；失败返回其他错误码，详见返回码定义。 |
 | 异步回调 | 无。 |
-| 备注 | 本函数返回调用时刻的状态快照，不主动触发状态流转。 |
+| 备注 | 本函数返回调用时刻的生命周期状态快照，不主动触发状态流转。 |
 
 #### <prefix>_set_option
 
@@ -278,26 +301,39 @@ typedef struct iec_session iec_session_t;
 | 字段 | 内容 |
 | --- | --- |
 | 函数名称 | `iec_status_t <prefix>_control_point(iec_session_t *session, const iec_command_request_t *request, uint32_t *out_command_id)` |
-| 函数功能 | 下发控制命令或设定值命令。 |
+| 函数功能 | 下发控制命令、设定值命令或以遥控格式承载的扩展运维命令。 |
 | 入参 | `iec_session_t *session`: 目标会话句柄。 |
-|  | `const iec_command_request_t *request`: 命令请求，描述目标地址、命令类型、命令模式和命令值。 |
+|  | `const iec_command_request_t *request`: 命令请求，描述目标地址、命令类型、命令语义、命令模式和命令值。 |
 | 出参 | `uint32_t *out_command_id`: 命令 ID 输出地址。成功时由库生成，用于关联异步命令结果。 |
 | 返回值 | `IEC_STATUS_OK`: 请求已进入发送流程；失败返回其他错误码，详见返回码定义。 |
 | 异步回调 | `on_command_result`。 |
-| 备注 | 命令最终结果以 `on_command_result` 回调为准。 |
+| 备注 | 命令最终结果以 `on_command_result` 回调为准。恢复出厂设置、设备重启等危险操作仍走本接口，但调用前的用户确认、权限校验、安全校核和操作审计由上层应用负责。 |
 
 #### <prefix>_clock_sync
 
 | 字段 | 内容 |
 | --- | --- |
-| 函数名称 | `iec_status_t <prefix>_clock_sync(iec_session_t *session, const iec_clock_sync_request_t *request)` |
+| 函数名称 | `iec_status_t <prefix>_clock_sync(iec_session_t *session, const iec_clock_sync_request_t *request, uint32_t *out_request_id)` |
 | 函数功能 | 发送校时命令。 |
 | 入参 | `iec_session_t *session`: 目标会话句柄。 |
 |  | `const iec_clock_sync_request_t *request`: 校时请求，可指定固定时间戳，也可要求库在发送时自动采集系统时间。 |
-| 出参 | 无。 |
+| 出参 | `uint32_t *out_request_id`: 请求 ID 输出地址。成功时由库生成，用于关联异步结果。 |
 | 返回值 | `IEC_STATUS_OK`: 请求已进入发送流程；失败返回其他错误码，详见返回码定义。 |
-| 异步回调 | `on_link_event`、`on_log`。 |
-| 备注 | 同步返回成功仅表示请求已进入发送流程，后续状态主要通过链路事件或日志体现。 |
+| 异步回调 | `on_clock_result`。 |
+| 备注 | 若 `use_current_system_time` 为真，库应在实际组帧前采集当前系统时间，避免排队造成时标偏差。 |
+
+#### <prefix>_read_clock
+
+| 字段 | 内容 |
+| --- | --- |
+| 函数名称 | `iec_status_t <prefix>_read_clock(iec_session_t *session, const iec_clock_read_request_t *request, uint32_t *out_request_id)` |
+| 函数功能 | 读取终端当前时间。 |
+| 入参 | `iec_session_t *session`: 目标会话句柄。 |
+|  | `const iec_clock_read_request_t *request`: 时钟读取请求，描述目标公共地址。 |
+| 出参 | `uint32_t *out_request_id`: 请求 ID 输出地址。成功时由库生成，用于关联异步结果。 |
+| 返回值 | `IEC_STATUS_OK`: 请求已进入发送流程；失败返回其他错误码，详见返回码定义。 |
+| 异步回调 | `on_clock_result`。 |
+| 备注 | 同步返回成功不表示已经读取到终端时间；终端时间通过 `on_clock_result` 返回。若目标协议或终端不支持主动读时钟，应返回 `IEC_STATUS_UNSUPPORTED` 或在异步结果中返回不支持。 |
 
 #### <prefix>_send_raw_asdu
 
@@ -316,6 +352,10 @@ typedef struct iec_session iec_session_t;
 
 - 高层数据接口是主路径，点表对象通过 `on_point_indication` 返回。
 - `<prefix>_control_point` 的最终结果以 `on_command_result` 为准。
+- `<prefix>_clock_sync` 和 `<prefix>_read_clock` 分别表达写终端时间和读终端时间，不应通过原始 ASDU 旁路或参数接口拼装实现。
+- 恢复出厂设置按技术方案附录 G 定义为单点或双点遥控，语义为“遥控合闸：恢复出厂设置”，因此不单独新增 `<prefix>_factory_reset` 函数；上层应根据自描述、点表模板或附录 G 配置确定信息体地址、单点/双点类型和合闸命令值后调用 `<prefix>_control_point`。
+- 设备重启或复位进程属于远方初始化语义，终端确认复位命令后可能主动重启并导致链路断开；命令受理结果通过 `on_command_result` 返回，后续链路断开、重连和重新总召通过 `on_link_event` 及普通初始化流程处理。
+- 协议库只执行已经确认的协议命令，不负责弹窗确认、无线运维模式禁用遥控、安全闭锁、角色权限和审计落库。
 - 原始 ASDU 旁路作为扩展和排障通道，与高层对象模型并行存在。
 
 ### 4.3 参数接口
@@ -471,10 +511,61 @@ typedef struct iec_session iec_session_t;
 - 文件读写最终结果统一以 `on_file_operation_result` 为准；调用返回 `IEC_STATUS_OK` 仅表示请求已被受理。
 - 若对端返回否定确认、传送原因异常或厂商扩展错误，库应尽量填充 `iec_file_operation_result_t.cause_of_transmission`、`native_error_code` 和 `detail_message`，便于上层排障。
 - 文件接口与自描述接口并行存在；`<prefix>_get_device_description` 仍负责终端模型文件的专用获取语义，不要求上层自行拼装文件传输报文。
+- 程序升级应优先使用 `<prefix>_upgrade_firmware`，不建议上层直接用 `<prefix>_write_file` 拼装完整升级流程。
+
+### 4.5 程序升级接口
+
+#### <prefix>_upgrade_firmware
+
+| 字段 | 内容 |
+| --- | --- |
+| 函数名称 | `iec_status_t <prefix>_upgrade_firmware(iec_session_t *session, const iec_upgrade_request_t *request, uint32_t *out_upgrade_id)` |
+| 函数功能 | 启动程序升级状态机，由动态库依次完成启动升级、升级执行、文件写入、升级结束等协议流程。 |
+| 入参 | `iec_session_t *session`: 目标会话句柄。 |
+|  | `const iec_upgrade_request_t *request`: 升级请求，描述远端目标文件、升级包大小、分块读取回调和分块大小。 |
+| 出参 | `uint32_t *out_upgrade_id`: 升级 ID 输出地址。成功时由库生成，用于关联进度、取消和最终结果。 |
+| 返回值 | `IEC_STATUS_OK`: 升级请求已被接受并进入异步状态机；失败返回其他错误码，详见返回码定义。 |
+| 异步回调 | `on_upgrade_progress`、`on_upgrade_result`；内部文件写入阶段不要求额外触发 `on_file_operation_result`。 |
+| 备注 | 同步返回成功不表示升级完成。升级包可信验签、MD5/SM3 校验、本地文件读取和用户确认由上层完成；协议库只按 `request->image.read` 读取待发送内容窗口并推进协议流程。 |
+
+#### <prefix>_cancel_upgrade
+
+| 字段 | 内容 |
+| --- | --- |
+| 函数名称 | `iec_status_t <prefix>_cancel_upgrade(iec_session_t *session, uint32_t upgrade_id)` |
+| 函数功能 | 请求取消指定程序升级流程。 |
+| 入参 | `iec_session_t *session`: 目标会话句柄。 |
+|  | `uint32_t upgrade_id`: 升级 ID。 |
+| 出参 | 无。 |
+| 返回值 | `IEC_STATUS_OK`: 取消请求已进入处理流程；失败返回其他错误码，详见返回码定义。 |
+| 异步回调 | `on_upgrade_progress`、`on_upgrade_result`。 |
+| 备注 | 取消是否最终生效以 `on_upgrade_result` 回调为准；若协议要求发送升级撤销命令，库内部负责封装并等待确认。 |
+
+程序升级状态机约束如下：
+
+- `<prefix>_upgrade_firmware` 是高层编排接口，不要求上层按启动升级、执行升级、写文件和升级结束逐步调用多个底层 API。
+- 动态库内部应按“启动升级命令 -> 升级确认/否认 -> 升级执行命令 -> 文件写入与断点续传 -> 升级结束命令 -> 最终结果”的顺序推进。
+- 文件写入阶段复用库内部文件传输能力和断点续传状态；进度通过 `on_upgrade_progress` 汇总返回给上层。
+- 若链路中断后会话可恢复，库可依据已确认偏移继续调用 `request->image.read` 获取剩余内容窗口；若状态不可恢复，应返回明确的升级失败结果。
+- 升级包内容读取失败、终端否定确认、偏移不匹配、协议错误或用户取消均应通过 `on_upgrade_result` 给出最终结果。
+- 协议库不负责升级包来源校验、可信验签、散列计算、版本策略、失败回退策略和 UI 交互。
 
 ## 5. 公共类型与回调
 
 ### 5.1 Transport、状态、返回码与运行时选项
+
+本节类型说明如下：
+
+| 类型 | 分类 | 作用 | 关键字段或取值 |
+| --- | --- | --- | --- |
+| `iec_runtime_state_t` | 枚举 | 表达会话生命周期状态 | `CREATED`、`STARTING`、`RUNNING`、`STOPPING`、`STOPPED`、`FAULTED` |
+| `iec_status_t` | 枚举 | 表达同步 API 返回码 | 成功、参数错误、不支持、状态错误、超时、内存、I/O、协议、忙、内部错误 |
+| `iec_option_t` | 枚举 | 表达可运行时修改的配置项 | 日志等级、重连间隔、命令超时、原始 ASDU 旁路开关 |
+| `iec_transport_send_fn` | 函数指针 | 发送一帧明文协议帧 | `ctx`、`data`、`len`、`timeout_ms` |
+| `iec_transport_recv_fn` | 函数指针 | 接收一帧明文协议帧 | `ctx`、`buffer`、`capacity`、`out_len`、`timeout_ms` |
+| `iec_transport_t` | 结构体 | 外部传输适配接口 | `send`、`recv`、`ctx`、`max_plain_frame_len` |
+
+对应 C 定义如下：
 
 ```c
 typedef enum iec_runtime_state {
@@ -530,7 +621,7 @@ typedef struct iec_transport {
 协议建模约束如下：
 
 - 协议库只通过 `iec_transport_t` 收发明文协议帧，不解析串口路径、远端地址或端口。
-- 明文 transport 可直接读写串口/socket；安全 transport 可在内部调用安全接口库完成 EB 封装、加解密和真实收发。
+- 明文 transport 可直接读写串口/socket；安全 transport 可在内部调用运维工具侧安全接口库完成 EB 封装、加解密和真实收发。
 - `recv` 应向协议库返回一帧完整的明文协议帧；粘包、半包、EB 报文重组和安全解封装由 transport 实现处理。
 - `send` 和 `recv` 的返回值由 transport 实现定义；建议返回 `0` 表示成功，非 `0` 表示传输层错误，并通过日志或扩展诊断保留原始错误码。
 - `max_plain_frame_len` 必须小于等于 transport 在当前模式下可承载的明文协议帧上限；安全模式下应扣除 EB 头尾、MAC 和加密开销。
@@ -545,6 +636,18 @@ typedef struct iec_transport {
 - 公共地址长度、信息体地址长度等协议建模参数。
 
 ### 5.2 点位地址与点值模型
+
+本节类型说明如下：
+
+| 类型 | 分类 | 作用 | 关键字段或取值 |
+| --- | --- | --- | --- |
+| `iec_point_address_t` | 结构体 | 表达协议原生点位地址 | 公共地址、信息体地址、类型标识、传送原因、发起者地址 |
+| `iec_point_type_t` | 枚举 | 表达高层点值类型 | 单点、双点、步位值、归一化遥测、标度化遥测、短浮点遥测、累计量、32 位比特串 |
+| `iec_timestamp_t` | 结构体 | 表达规约时标 | 毫秒、分、时、日、月、年、有效性标志 |
+| `iec_point_data_t` | 联合体 | 承载点值实际数据 | `single`、`doubled`、`scaled`、`short_float`、`integrated_total`、`bitstring32`、`step` |
+| `iec_point_value_t` | 结构体 | 表达上送点值对象 | 点值类型、质量位、时标标志、序列标志、数据、时标 |
+
+对应 C 定义如下：
 
 ```c
 typedef struct iec_point_address {
@@ -598,25 +701,75 @@ typedef struct iec_point_value {
 
 当前高层点表覆盖以下对象：
 
-- 单点遥信
-- 双点遥信
-- 归一化遥测
-- 标度化遥测
-- 短浮点遥测
-- 累计量
-- 步位值
-- 32 位比特串
+| 对象 | 对应类型 | 典型用途 |
+| --- | --- | --- |
+| 单点遥信 | `IEC_POINT_SINGLE` | 开关量状态上送 |
+| 双点遥信 | `IEC_POINT_DOUBLE` | 双点状态上送 |
+| 归一化遥测 | `IEC_POINT_MEASURED_NORMALIZED` | 归一化模拟量上送 |
+| 标度化遥测 | `IEC_POINT_MEASURED_SCALED` | 标度化模拟量上送 |
+| 短浮点遥测 | `IEC_POINT_MEASURED_SHORT_FLOAT` | 浮点模拟量上送 |
+| 累计量 | `IEC_POINT_INTEGRATED_TOTAL` | 电度量、计数量上送 |
+| 步位值 | `IEC_POINT_STEP` | 分接头、步位状态上送 |
+| 32 位比特串 | `IEC_POINT_BITSTRING32` | 位图状态或扩展状态上送 |
 
 ### 5.3 命令、召唤、校时与原始 ASDU 模型
+
+本节类型说明如下：
+
+| 类型 | 分类 | 作用 | 关键字段或取值 |
+| --- | --- | --- | --- |
+| `iec_command_type_t` | 枚举 | 表达遥控或遥调命令类型 | 单命令、双命令、步调节、归一化设定值、标度化设定值、浮点设定值 |
+| `iec_command_semantic_t` | 枚举 | 表达命令业务语义 | 普通命令、恢复出厂设置、设备重启 |
+| `iec_command_mode_t` | 枚举 | 表达命令执行模式 | 直接执行、选择、执行、撤销选择 |
+| `iec_command_data_t` | 联合体 | 承载命令值 | `single`、`doubled`、`normalized`、`scaled`、`short_float`、`step` |
+| `iec_command_request_t` | 结构体 | 表达遥控或遥调请求 | 目标地址、命令类型、命令语义、命令模式、限定词、超时、命令值 |
+| `iec_interrogation_request_t` | 结构体 | 表达总召请求 | 公共地址、总召限定词 |
+| `iec_counter_interrogation_request_t` | 结构体 | 表达电度量召唤请求 | 公共地址、召唤限定词、冻结语义 |
+| `iec_clock_sync_request_t` | 结构体 | 表达校时请求 | 公共地址、是否使用系统时间、指定时标 |
+| `iec_clock_read_request_t` | 结构体 | 表达时钟读取请求 | 公共地址 |
+| `iec_clock_operation_t` | 枚举 | 表达时钟操作类型 | 校时、读时钟 |
+| `iec_clock_result_code_t` | 枚举 | 表达时钟操作结果 | 接受、拒绝、超时、否定确认、协议错误、不支持 |
+| `iec_clock_result_t` | 结构体 | 表达时钟操作异步结果 | 请求 ID、操作类型、结果、终端时标、诊断信息 |
+| `iec_raw_asdu_direction_t` | 枚举 | 表达原始 ASDU 方向 | 接收、发送 |
+| `iec_raw_asdu_event_t` | 结构体 | 表达原始 ASDU 观察事件 | 方向、公共地址、类型标识、传送原因、载荷、时间戳 |
+| `iec_raw_asdu_tx_t` | 结构体 | 表达原始 ASDU 透传发送请求 | 载荷、长度、是否绕过高层校验 |
+
+命令类型覆盖如下：
+
+| 命令类型 | 业务语义 | `iec_command_data_t` 字段 | 适用接口 |
+| --- | --- | --- | --- |
+| `IEC_COMMAND_SINGLE` | 单点遥控 | `single` | `<prefix>_control_point` |
+| `IEC_COMMAND_DOUBLE` | 双点遥控 | `doubled` | `<prefix>_control_point` |
+| `IEC_COMMAND_STEP` | 步调节遥调 | `step` | `<prefix>_control_point` |
+| `IEC_COMMAND_SETPOINT_NORMALIZED` | 归一化设定值遥调 | `normalized` | `<prefix>_control_point` |
+| `IEC_COMMAND_SETPOINT_SCALED` | 标度化设定值遥调 | `scaled` | `<prefix>_control_point` |
+| `IEC_COMMAND_SETPOINT_FLOAT` | 浮点设定值遥调 | `short_float` | `<prefix>_control_point` |
+
+命令业务语义覆盖如下：
+
+| 命令语义 | 业务含义 | 协议编码关系 |
+| --- | --- | --- |
+| `IEC_COMMAND_SEMANTIC_GENERAL` | 普通遥控或遥调命令 | 完全由 `command_type`、`address` 和 `value` 决定 |
+| `IEC_COMMAND_SEMANTIC_FACTORY_RESET` | 恢复出厂设置 | 仍编码为单点或双点遥控，语义为恢复三遥和遥调参数出厂值 |
+| `IEC_COMMAND_SEMANTIC_DEVICE_REBOOT` | 设备重启或复位进程 | 仍编码为终端支持的复位/重启遥控或复位命令，确认后终端可能重启 |
+
+对应 C 定义如下：
 
 ```c
 typedef enum iec_command_type {
     IEC_COMMAND_SINGLE = 1,          /* 单命令 */
     IEC_COMMAND_DOUBLE = 2,          /* 双命令 */
     IEC_COMMAND_STEP = 3,            /* 步调节命令 */
-    IEC_COMMAND_SETPOINT_SCALED = 4, /* 标度化设定值 */
-    IEC_COMMAND_SETPOINT_FLOAT = 5   /* 浮点设定值 */
+    IEC_COMMAND_SETPOINT_SCALED = 4,     /* 标度化设定值 */
+    IEC_COMMAND_SETPOINT_FLOAT = 5,      /* 浮点设定值 */
+    IEC_COMMAND_SETPOINT_NORMALIZED = 6  /* 归一化设定值 */
 } iec_command_type_t;
+
+typedef enum iec_command_semantic {
+    IEC_COMMAND_SEMANTIC_GENERAL = 0,       /* 普通命令 */
+    IEC_COMMAND_SEMANTIC_FACTORY_RESET = 1, /* 恢复出厂设置 */
+    IEC_COMMAND_SEMANTIC_DEVICE_REBOOT = 2  /* 设备重启或复位进程 */
+} iec_command_semantic_t;
 
 typedef enum iec_command_mode {
     IEC_COMMAND_MODE_DIRECT = 1,  /* 直接执行 */
@@ -626,16 +779,18 @@ typedef enum iec_command_mode {
 } iec_command_mode_t;
 
 typedef union iec_command_data {
-    uint8_t single;    /* 单命令值 */
-    uint8_t doubled;   /* 双命令值 */
-    int16_t scaled;    /* 标度化设定值 */
-    float short_float; /* 浮点设定值 */
-    int8_t step;       /* 步调节值 */
+    uint8_t single;     /* 单命令值 */
+    uint8_t doubled;    /* 双命令值 */
+    int16_t normalized; /* 归一化设定值 */
+    int16_t scaled;     /* 标度化设定值 */
+    float short_float;  /* 浮点设定值 */
+    int8_t step;        /* 步调节值 */
 } iec_command_data_t;
 
 typedef struct iec_command_request {
     iec_point_address_t address;     /* 目标点位地址 */
     iec_command_type_t command_type; /* 命令类型 */
+    iec_command_semantic_t semantic; /* 命令业务语义 */
     iec_command_mode_t mode;         /* 命令模式 */
     uint8_t qualifier;               /* 命令限定词 */
     uint8_t execute_on_ack;          /* 是否在确认后继续执行本地流程 */
@@ -660,6 +815,36 @@ typedef struct iec_clock_sync_request {
     iec_timestamp_t timestamp;       /* 指定时标, 当 use_current_system_time == 0 时使用 */
 } iec_clock_sync_request_t;
 
+typedef struct iec_clock_read_request {
+    uint16_t common_address;         /* 目标公共地址 */
+} iec_clock_read_request_t;
+
+typedef enum iec_clock_operation {
+    IEC_CLOCK_OPERATION_SYNC = 1,     /* 校时 */
+    IEC_CLOCK_OPERATION_READ = 2      /* 读取终端当前时间 */
+} iec_clock_operation_t;
+
+typedef enum iec_clock_result_code {
+    IEC_CLOCK_RESULT_ACCEPTED = 1,         /* 对端接受 */
+    IEC_CLOCK_RESULT_REJECTED = 2,         /* 对端拒绝 */
+    IEC_CLOCK_RESULT_TIMEOUT = 3,          /* 等待超时 */
+    IEC_CLOCK_RESULT_NEGATIVE_CONFIRM = 4, /* 收到否定确认 */
+    IEC_CLOCK_RESULT_PROTOCOL_ERROR = 5,   /* 协议处理异常 */
+    IEC_CLOCK_RESULT_UNSUPPORTED = 6       /* 目标协议或终端不支持 */
+} iec_clock_result_code_t;
+
+typedef struct iec_clock_result {
+    uint32_t request_id;                   /* 与 clock_sync/read_clock 返回的请求 ID 对应 */
+    iec_clock_operation_t operation;       /* 时钟操作类型 */
+    iec_clock_result_code_t result;        /* 操作结果 */
+    uint16_t common_address;               /* 目标公共地址 */
+    uint8_t has_timestamp;                 /* 是否携带终端时标 */
+    iec_timestamp_t timestamp;             /* 终端当前时间, 仅读时钟成功时有效 */
+    uint8_t cause_of_transmission;         /* 协议传送原因, 0 表示未知 */
+    int32_t native_error_code;             /* 底层或厂商扩展错误码 */
+    const char *detail_message;            /* 可选诊断文本 */
+} iec_clock_result_t;
+
 typedef enum iec_raw_asdu_direction {
     IEC_RAW_ASDU_RX = 1, /* 接收方向 */
     IEC_RAW_ASDU_TX = 2  /* 发送方向 */
@@ -682,7 +867,77 @@ typedef struct iec_raw_asdu_tx {
 } iec_raw_asdu_tx_t;
 ```
 
-### 5.4 参数、自描述与文件模型
+命令模型约束如下：
+
+- `iec_command_request_t.semantic` 只表达业务语义，不改变底层规约类型标识；实际编码仍由 `command_type`、`address`、`mode` 和 `value` 决定。
+- 归一化设定值遥调使用 `IEC_COMMAND_SETPOINT_NORMALIZED` 和 `value.normalized`，取值按 IEC 60870 归一化值语义表达；标度化和短浮点设定值分别继续使用 `IEC_COMMAND_SETPOINT_SCALED` 与 `IEC_COMMAND_SETPOINT_FLOAT`。
+- 恢复出厂设置使用 `IEC_COMMAND_SEMANTIC_FACTORY_RESET`，`command_type` 应为 `IEC_COMMAND_SINGLE` 或 `IEC_COMMAND_DOUBLE`，目标信息体地址和合闸命令值来自终端自描述、点表模板或技术方案附录 G 的扩展遥控配置。
+- 恢复出厂设置属于危险操作；上层应用收到用户或外部系统的恢复出厂设置指令后，应先完成二次确认、权限校验、安全闭锁、无线运维模式检查和审计记录，再调用 `<prefix>_control_point`。
+- 设备重启或复位进程使用 `IEC_COMMAND_SEMANTIC_DEVICE_REBOOT`。终端确认命令后可能立即重启并断开链路，`on_command_result` 只表示命令确认结果，后续链路变化通过 `on_link_event` 上报。
+- 恢复出厂设置或设备重启完成后，终端数据和参数缓存应视为失效；上层应在链路恢复后重新总召、读取参数或重新获取自描述内容。
+- `iec_clock_result_t.has_timestamp` 仅在读时钟成功且终端返回有效时标时为真；校时结果主要关注 `result` 和诊断字段。
+
+### 5.4 参数、自描述、文件与升级模型
+
+自描述类型说明如下：
+
+| 类型 | 分类 | 作用 | 关键字段或取值 |
+| --- | --- | --- | --- |
+| `iec_device_description_format_t` | 枚举 | 表达终端自描述内容格式 | 自动、XML、msg |
+| `iec_device_description_request_t` | 结构体 | 表达自描述获取请求 | 公共地址、格式偏好、最大内容长度 |
+| `iec_device_description_t` | 结构体 | 表达自描述返回内容 | 请求 ID、公共地址、实际格式、内容视图、分片长度、完成标志 |
+
+文件类型说明如下：
+
+| 类型 | 分类 | 作用 | 关键字段或取值 |
+| --- | --- | --- | --- |
+| `iec_file_operation_t` | 枚举 | 表达文件操作类型 | 目录召唤、读取、写入、取消 |
+| `iec_file_transfer_direction_t` | 枚举 | 表达文件传输方向 | 远端到本地、本地到远端 |
+| `iec_file_transfer_state_t` | 枚举 | 表达文件传输本地状态 | 已受理、传输中、已完成、已取消、失败 |
+| `iec_file_result_code_t` | 枚举 | 表达文件操作结果 | 已受理、完成、取消、拒绝、否定确认、偏移不匹配、超时、协议错误、不存在 |
+| `iec_file_list_request_t` | 结构体 | 表达目录召唤请求 | 公共地址、目录名、是否附带详情 |
+| `iec_file_entry_t` | 结构体 | 表达目录项 | 目录名、文件名、大小、修改时间、目录标志、只读标志、校验摘要 |
+| `iec_file_list_indication_t` | 结构体 | 表达目录召唤返回分片 | 请求 ID、公共地址、目录名、目录项数组、数量、完成标志 |
+| `iec_file_read_request_t` | 结构体 | 表达文件读取请求 | 公共地址、目录名、文件名、起始偏移、期望分块、已知总大小 |
+| `iec_file_write_request_t` | 结构体 | 表达文件写入请求 | 公共地址、目录名、文件名、起始偏移、总大小、内容窗口、建议分块、覆盖标志 |
+| `iec_file_data_indication_t` | 结构体 | 表达文件数据块返回 | 传输 ID、方向、文件定位、总大小、当前偏移、下个偏移、数据视图、完成标志 |
+| `iec_file_transfer_status_t` | 结构体 | 表达文件传输状态快照 | 传输 ID、方向、状态、文件定位、已确认偏移、续传标志、最近结果 |
+| `iec_file_operation_result_t` | 结构体 | 表达文件类操作最终或阶段结果 | 请求 ID、传输 ID、操作、方向、结果、文件定位、最终偏移、诊断信息 |
+
+程序升级类型说明如下：
+
+| 类型 | 分类 | 作用 | 关键字段或取值 |
+| --- | --- | --- | --- |
+| `iec_upgrade_read_chunk_fn` | 函数指针 | 由上层按偏移提供升级包内容窗口 | 上下文、偏移、输出缓冲区、输出长度 |
+| `iec_upgrade_image_source_t` | 结构体 | 表达升级包内容来源 | 上下文、总大小、分块读取函数 |
+| `iec_upgrade_stage_t` | 枚举 | 表达升级状态机阶段 | 启动、等待启动确认、执行、文件传输、结束、撤销、完成、失败、已取消 |
+| `iec_upgrade_result_code_t` | 枚举 | 表达升级最终结果 | 完成、拒绝、取消、超时、传输失败、否定确认、协议错误、不支持、内容读取失败 |
+| `iec_upgrade_request_t` | 结构体 | 表达程序升级请求 | 公共地址、远端文件位置、升级包来源、分块大小、校验文本、超时 |
+| `iec_upgrade_progress_t` | 结构体 | 表达程序升级进度 | 升级 ID、阶段、已传输字节数、总大小、关联文件传输 ID |
+| `iec_upgrade_result_t` | 结构体 | 表达程序升级最终结果 | 升级 ID、结果码、最终阶段、已传输字节数、诊断信息 |
+
+参数类型说明如下：
+
+| 类型 | 分类 | 作用 | 关键字段或取值 |
+| --- | --- | --- | --- |
+| `iec_parameter_scope_t` | 枚举 | 表达参数域 | 全部、固有、运行、动作、无线、电源、线损、点表配置 |
+| `iec_parameter_access_t` | 枚举 | 表达参数访问属性 | 只读、只写、可读写 |
+| `iec_parameter_value_type_t` | 枚举 | 表达参数值类型 | 布尔、有符号整型、无符号整型、浮点、枚举、字符串 |
+| `iec_parameter_scalar_t` | 联合体 | 承载参数标量值 | `bool_value`、`int_value`、`uint_value`、`float_value`、`enum_value`、`string_value` |
+| `iec_parameter_item_t` | 结构体 | 表达当前参数值或待写入参数 | 参数 ID、地址、参数域、值类型、值 |
+| `iec_parameter_descriptor_t` | 结构体 | 表达参数描述信息 | 参数 ID、地址、参数域、值类型、读写属性、名称、分组、单位、范围、模板与校验能力 |
+| `iec_parameter_read_mode_t` | 枚举 | 表达参数读取模式 | 全部、按域、按分组、按地址范围 |
+| `iec_parameter_read_request_t` | 结构体 | 表达参数读取请求 | 公共地址、读取模式、参数域、分组、地址范围、定值区、是否返回描述 |
+| `iec_parameter_write_request_t` | 结构体 | 表达参数写入请求 | 公共地址、定值区、参数数组、数量、写后校验标志 |
+| `iec_parameter_verify_request_t` | 结构体 | 表达参数回读校验请求 | 公共地址、定值区、期望参数数组、数量 |
+| `iec_setting_group_action_t` | 枚举 | 表达定值区动作 | 查询当前区、切换到目标区 |
+| `iec_setting_group_request_t` | 结构体 | 表达定值区请求 | 公共地址、动作、目标定值区 |
+| `iec_parameter_operation_t` | 枚举 | 表达参数操作类型 | 读取、写入、校验、定值区操作 |
+| `iec_parameter_result_code_t` | 枚举 | 表达参数操作结果 | 接受、拒绝、校验一致、校验不一致、只读、越限、切区成功、超时、协议错误、当前区返回 |
+| `iec_parameter_indication_t` | 结构体 | 表达参数读取返回 | 请求 ID、操作、定值区、完成标志、描述标志、参数值、参数描述 |
+| `iec_parameter_result_t` | 结构体 | 表达参数操作结果 | 请求 ID、操作、结果码、参数 ID、地址、定值区、最终标志 |
+
+对应 C 定义如下：
 
 ```c
 typedef enum iec_device_description_format {
@@ -830,14 +1085,84 @@ typedef struct iec_file_operation_result {
     uint8_t is_final;                       /* 是否为最终结果 */
 } iec_file_operation_result_t;
 
+typedef int (*iec_upgrade_read_chunk_fn)(
+    void *ctx,
+    uint32_t offset,
+    uint8_t *buffer,
+    uint32_t capacity,
+    uint32_t *out_len);
+
+typedef struct iec_upgrade_image_source {
+    void *ctx;                         /* 上层升级包读取上下文 */
+    uint32_t total_size;               /* 升级包总大小 */
+    iec_upgrade_read_chunk_fn read;    /* 按偏移读取升级包内容 */
+} iec_upgrade_image_source_t;
+
+typedef enum iec_upgrade_stage {
+    IEC_UPGRADE_STAGE_STARTING = 1,           /* 正在发送启动升级命令 */
+    IEC_UPGRADE_STAGE_WAIT_START_CONFIRM = 2, /* 等待启动升级确认 */
+    IEC_UPGRADE_STAGE_EXECUTING = 3,          /* 正在发送升级执行命令 */
+    IEC_UPGRADE_STAGE_TRANSFERRING = 4,       /* 正在写入升级文件 */
+    IEC_UPGRADE_STAGE_FINISHING = 5,          /* 正在发送升级结束命令 */
+    IEC_UPGRADE_STAGE_CANCELING = 6,          /* 正在发送升级撤销命令 */
+    IEC_UPGRADE_STAGE_COMPLETED = 7,          /* 升级流程完成 */
+    IEC_UPGRADE_STAGE_FAILED = 8,             /* 升级流程失败 */
+    IEC_UPGRADE_STAGE_CANCELED = 9            /* 升级流程已取消 */
+} iec_upgrade_stage_t;
+
+typedef enum iec_upgrade_result_code {
+    IEC_UPGRADE_RESULT_COMPLETED = 1,        /* 升级完成 */
+    IEC_UPGRADE_RESULT_REJECTED = 2,         /* 对端拒绝 */
+    IEC_UPGRADE_RESULT_CANCELED = 3,         /* 已取消 */
+    IEC_UPGRADE_RESULT_TIMEOUT = 4,          /* 等待确认或传输超时 */
+    IEC_UPGRADE_RESULT_TRANSFER_FAILED = 5,  /* 文件传输失败 */
+    IEC_UPGRADE_RESULT_NEGATIVE_CONFIRM = 6, /* 收到否定确认 */
+    IEC_UPGRADE_RESULT_PROTOCOL_ERROR = 7,   /* 协议处理错误 */
+    IEC_UPGRADE_RESULT_UNSUPPORTED = 8,      /* 目标协议或终端不支持 */
+    IEC_UPGRADE_RESULT_READ_FAILED = 9       /* 升级包内容读取失败 */
+} iec_upgrade_result_code_t;
+
+typedef struct iec_upgrade_request {
+    uint16_t common_address;                 /* 目标公共地址 */
+    const char *remote_directory;            /* 远端升级目录 */
+    const char *remote_file_name;            /* 远端升级文件名 */
+    iec_upgrade_image_source_t image;        /* 升级包内容来源 */
+    uint32_t preferred_chunk_size;           /* 建议分块大小 */
+    const char *checksum_text;               /* 可选校验摘要文本, 用于诊断或对端扩展 */
+    uint8_t overwrite_existing;              /* 是否允许覆盖已有文件 */
+    uint32_t command_timeout_ms;             /* 升级命令确认超时 */
+    uint32_t transfer_timeout_ms;            /* 文件传输阶段超时 */
+} iec_upgrade_request_t;
+
+typedef struct iec_upgrade_progress {
+    uint32_t upgrade_id;                     /* 升级 ID */
+    iec_upgrade_stage_t stage;               /* 当前阶段 */
+    uint32_t transfer_id;                    /* 关联文件传输 ID, 非传输阶段可为 0 */
+    uint32_t bytes_transferred;              /* 已确认传输字节数 */
+    uint32_t total_size;                     /* 升级包总大小 */
+    uint8_t percent;                         /* 进度百分比, 0~100 */
+} iec_upgrade_progress_t;
+
+typedef struct iec_upgrade_result {
+    uint32_t upgrade_id;                     /* 升级 ID */
+    iec_upgrade_result_code_t result;        /* 最终结果码 */
+    iec_upgrade_stage_t final_stage;         /* 结束时所在阶段 */
+    uint32_t bytes_transferred;              /* 已确认传输字节数 */
+    uint32_t total_size;                     /* 升级包总大小 */
+    uint8_t cause_of_transmission;           /* 协议传送原因, 0 表示未知 */
+    int32_t native_error_code;               /* 底层或厂商扩展错误码 */
+    const char *detail_message;              /* 可选诊断文本 */
+} iec_upgrade_result_t;
+
 typedef enum iec_parameter_scope {
-    IEC_PARAMETER_SCOPE_ALL = 0,      /* 全部参数 */
-    IEC_PARAMETER_SCOPE_FIXED = 1,    /* 固有参数 */
-    IEC_PARAMETER_SCOPE_RUNNING = 2,  /* 运行参数 */
-    IEC_PARAMETER_SCOPE_ACTION = 3,   /* 动作参数 */
-    IEC_PARAMETER_SCOPE_WIRELESS = 4, /* 无线模块参数 */
-    IEC_PARAMETER_SCOPE_POWER = 5,    /* 电源模块参数 */
-    IEC_PARAMETER_SCOPE_LINE_LOSS = 6 /* 线损模块参数 */
+    IEC_PARAMETER_SCOPE_ALL = 0,         /* 全部参数 */
+    IEC_PARAMETER_SCOPE_FIXED = 1,       /* 固有参数 */
+    IEC_PARAMETER_SCOPE_RUNNING = 2,     /* 运行参数 */
+    IEC_PARAMETER_SCOPE_ACTION = 3,      /* 动作参数 */
+    IEC_PARAMETER_SCOPE_WIRELESS = 4,    /* 无线模块参数 */
+    IEC_PARAMETER_SCOPE_POWER = 5,       /* 电源模块参数 */
+    IEC_PARAMETER_SCOPE_LINE_LOSS = 6,   /* 线损模块参数 */
+    IEC_PARAMETER_SCOPE_POINT_TABLE = 7  /* 点表配置参数 */
 } iec_parameter_scope_t;
 
 typedef enum iec_parameter_access {
@@ -974,9 +1299,10 @@ typedef struct iec_parameter_result {
 } iec_parameter_result_t;
 ```
 
-参数、自描述与文件模型约束如下：
+参数、自描述、文件与升级模型约束如下：
 
-- `iec_parameter_scope_t` 用于统一表达固有参数、运行参数、动作参数和各类模块参数，不在接口层为无线、电源、线损单独派生函数族。
+- `iec_parameter_scope_t` 用于统一表达固有参数、运行参数、动作参数、点表配置和各类模块参数，不在接口层为无线、电源、线损单独派生函数族。
+- 点表在线读取、修改和模板下发校验通过参数接口承载，使用 `IEC_PARAMETER_SCOPE_POINT_TABLE` 表达点表配置域；实时遥信、遥测、电量等运行点值仍通过点表接口和 `on_point_indication` 承载。
 - `iec_parameter_descriptor_t` 用于承载参数名称、范围、缺省值和模板/校验能力，便于上层构建模板和参数编辑界面。
 - `iec_parameter_item_t` 只表达当前参数值；若上层需要保留参数名称、单位等元数据，应结合 `descriptor` 一并缓存。
 - `include_descriptor` 适合首次建模或模板加载场景；频繁轮询场景下可关闭以减少冗余数据。
@@ -987,8 +1313,43 @@ typedef struct iec_parameter_result {
 - `iec_file_write_request_t.total_size` 描述远端目标文件总长度，`content_size` 描述本次待发送窗口长度；上层可一次性提供完整文件，也可在续传场景只提供剩余窗口。
 - `iec_file_operation_result_t.cause_of_transmission`、`native_error_code` 和 `detail_message` 用于承接否定确认、传送原因失败、偏移非法等诊断细节；`detail_message` 为空时，上层至少应结合 `result` 与 `cause_of_transmission` 做错误归因。
 - `iec_file_list_indication_t.entries`、`iec_file_data_indication_t.data` 以及文件回调结果中的字符串字段仅在当前回调期间有效，若需跨线程保留应立即拷贝。
+- `iec_upgrade_image_source_t.read` 由上层提供升级包内容窗口；协议库不直接打开本地文件，也不持有升级包文件路径。
+- 升级过程中 `iec_upgrade_image_source_t.ctx` 和 `read` 必须保持有效，直到收到 `on_upgrade_result` 最终回调。
+- `iec_upgrade_request_t.checksum_text` 只作为诊断或对端扩展字段；升级包 MD5/SM3 计算和可信验签由上层或安全适配层完成。
 
 ### 5.5 回调类型与回调集合
+
+辅助类型说明如下：
+
+| 类型 | 分类 | 作用 | 关键字段或取值 |
+| --- | --- | --- | --- |
+| `iec_link_event_t` | 枚举 | 表达链路事件类型 | 建链中、已连接、已断开、重连中、对端复位、链路错误 |
+| `iec_log_level_t` | 枚举 | 表达日志等级 | 错误、警告、信息、调试 |
+| `iec_command_result_code_t` | 枚举 | 表达遥控或遥调命令结果 | 接受、拒绝、超时、否定确认、协议错误 |
+| `iec_command_result_t` | 结构体 | 表达命令异步结果 | 命令 ID、命令语义、结果码、目标地址、最终标志 |
+| `iec_clock_result_t` | 结构体 | 表达校时或时钟读取异步结果 | 请求 ID、操作类型、结果码、终端时标、诊断信息 |
+
+回调集合说明如下：
+
+| 回调字段 | 回调类型 | 触发时机 | 关键数据 | 数据生命周期 |
+| --- | --- | --- | --- | --- |
+| `on_session_state` | `iec_on_session_state_fn` | 会话生命周期状态变化 | `iec_runtime_state_t` | 值传递 |
+| `on_link_event` | `iec_on_link_event_fn` | 建链、断链、重连或链路异常 | `iec_link_event_t`、`iec_status_t` | 值传递 |
+| `on_point_indication` | `iec_on_point_indication_fn` | 收到遥信、遥测、累计量等点表数据 | `iec_point_address_t`、`iec_point_value_t` | 当前回调期间有效 |
+| `on_command_result` | `iec_on_command_result_fn` | 遥控或遥调命令出现确认、否认、超时或最终结果 | `iec_command_result_t` | 当前回调期间有效 |
+| `on_device_description` | `iec_on_device_description_fn` | 收到终端自描述内容或分片 | `iec_device_description_t` | 当前回调期间有效 |
+| `on_file_list_indication` | `iec_on_file_list_indication_fn` | 收到文件目录项分片 | `iec_file_list_indication_t` | 当前回调期间有效 |
+| `on_file_data_indication` | `iec_on_file_data_indication_fn` | 收到文件读取数据块或写入进度数据 | `iec_file_data_indication_t` | 当前回调期间有效 |
+| `on_file_operation_result` | `iec_on_file_operation_result_fn` | 文件目录、读取、写入或取消操作产生结果 | `iec_file_operation_result_t` | 当前回调期间有效 |
+| `on_upgrade_progress` | `iec_on_upgrade_progress_fn` | 程序升级阶段或进度变化 | `iec_upgrade_progress_t` | 当前回调期间有效 |
+| `on_upgrade_result` | `iec_on_upgrade_result_fn` | 程序升级完成、失败或取消 | `iec_upgrade_result_t` | 当前回调期间有效 |
+| `on_clock_result` | `iec_on_clock_result_fn` | 校时或时钟读取完成 | `iec_clock_result_t` | 当前回调期间有效 |
+| `on_parameter_indication` | `iec_on_parameter_indication_fn` | 收到参数读取结果或参数描述 | `iec_parameter_indication_t` | 当前回调期间有效 |
+| `on_parameter_result` | `iec_on_parameter_result_fn` | 参数写入、校验或定值区切换产生结果 | `iec_parameter_result_t` | 当前回调期间有效 |
+| `on_raw_asdu` | `iec_on_raw_asdu_fn` | 启用旁路后观察到原始 ASDU 收发 | `iec_raw_asdu_event_t` | 当前回调期间有效 |
+| `on_log` | `iec_on_log_fn` | 动态库产生日志 | 日志等级、日志文本 | 当前回调期间有效 |
+
+对应 C 定义如下：
 
 ```c
 typedef enum iec_link_event {
@@ -1017,6 +1378,7 @@ typedef enum iec_command_result_code {
 
 typedef struct iec_command_result {
     uint32_t command_id;              /* 与 control_point 返回的命令 ID 对应 */
+    iec_command_semantic_t semantic;  /* 命令业务语义 */
     iec_command_result_code_t result; /* 命令结果 */
     iec_point_address_t address;      /* 目标点位地址 */
     uint8_t is_final;                 /* 是否最终结果 */
@@ -1131,6 +1493,42 @@ typedef void (*iec_on_file_operation_result_fn)(
     void *user_context);
 
 /**
+ * @brief 程序升级进度回调。
+ *
+ * @param[in] session      触发回调的会话句柄。
+ * @param[in] progress     升级阶段与进度视图。
+ * @param[in] user_context 用户上下文，原样来自 `iec_session_config_t.user_context`。
+ */
+typedef void (*iec_on_upgrade_progress_fn)(
+    iec_session_t *session,
+    const iec_upgrade_progress_t *progress,
+    void *user_context);
+
+/**
+ * @brief 程序升级最终结果回调。
+ *
+ * @param[in] session      触发回调的会话句柄。
+ * @param[in] result       升级最终结果视图。
+ * @param[in] user_context 用户上下文，原样来自 `iec_session_config_t.user_context`。
+ */
+typedef void (*iec_on_upgrade_result_fn)(
+    iec_session_t *session,
+    const iec_upgrade_result_t *result,
+    void *user_context);
+
+/**
+ * @brief 时钟操作结果回调。
+ *
+ * @param[in] session      触发回调的会话句柄。
+ * @param[in] result       校时或时钟读取结果视图。
+ * @param[in] user_context 用户上下文，原样来自 `iec_session_config_t.user_context`。
+ */
+typedef void (*iec_on_clock_result_fn)(
+    iec_session_t *session,
+    const iec_clock_result_t *result,
+    void *user_context);
+
+/**
  * @brief 参数读取结果回调。
  *
  * @param[in] session      触发回调的会话句柄。
@@ -1195,6 +1593,9 @@ typedef struct iec_callbacks {
     iec_on_file_list_indication_fn on_file_list_indication; /* 文件目录回调 */
     iec_on_file_data_indication_fn on_file_data_indication; /* 文件数据回调 */
     iec_on_file_operation_result_fn on_file_operation_result; /* 文件结果回调 */
+    iec_on_upgrade_progress_fn on_upgrade_progress; /* 升级进度回调 */
+    iec_on_upgrade_result_fn on_upgrade_result;     /* 升级结果回调 */
+    iec_on_clock_result_fn on_clock_result;          /* 时钟结果回调 */
     iec_on_parameter_indication_fn on_parameter_indication; /* 参数读取回调 */
     iec_on_parameter_result_fn on_parameter_result; /* 参数结果回调 */
     iec_on_raw_asdu_fn on_raw_asdu;           /* 原始 ASDU 回调 */
@@ -1209,11 +1610,11 @@ typedef struct iec_callbacks {
 - 不同会话之间回调允许并发发生。
 - 回调函数必须尽快返回，禁止执行长时间阻塞操作。
 - 回调中采用业务队列、轻量级拷贝和异步处理模式最稳妥。
-- 若需要跨线程保留回调中的地址、点值、参数描述、自描述内容、文件目录项、文件数据块、日志内容或原始 ASDU 数据，调用方应自行拷贝。
+- 若需要跨线程保留回调中的地址、点值、参数描述、自描述内容、文件目录项、文件数据块、升级结果、时钟结果、日志内容或原始 ASDU 数据，调用方应自行拷贝。
 
 回调重入规则如下：
 
-- `on_point_indication`、`on_command_result`、`on_file_list_indication`、`on_file_data_indication`、`on_file_operation_result`、`on_parameter_indication`、`on_parameter_result`、`on_raw_asdu` 允许在其他业务线程触发新的控制 API。
+- `on_point_indication`、`on_command_result`、`on_file_list_indication`、`on_file_data_indication`、`on_file_operation_result`、`on_upgrade_progress`、`on_upgrade_result`、`on_clock_result`、`on_parameter_indication`、`on_parameter_result`、`on_raw_asdu` 允许在其他业务线程触发新的控制 API。
 - 库内部保证线程安全，业务时序由上层状态机或串行控制线程协调。
 - 生命周期控制 API 与回调之间的竞态由调用方控制。
 
@@ -1352,6 +1753,9 @@ iec_status_t iec104_validate_config(const iec104_master_config_t *config);
 - 文件读取与文件写入统一采用 `start_offset` 断点语义；首次传输使用 `start_offset = 0`，续传使用最近已确认的 `next_offset` 或 `acknowledged_offset`。
 - `<prefix>_get_file_transfer_status` 返回库内部维护的本地快照，适合外部轮询进度、恢复点和是否可续传状态，不要求上层自行跟踪协议分帧细节。
 - 文件类异步结果除 `result` 外，还应尽量回填原始 `cause_of_transmission`、底层错误码和诊断文本，用于表达“传送原因失败”“否定确认”“厂商拒绝”等细粒度失败原因。
+- 程序升级通过 `<prefix>_upgrade_firmware` 启动高层状态机；库内部按技术方案要求依次封装启动升级命令、升级执行命令、文件写入过程和升级结束命令。
+- 升级文件写入阶段复用文件传输与断点续传能力，但对上层统一呈现为 `on_upgrade_progress` 和 `on_upgrade_result`，避免上层同时协调命令结果和文件结果。
+- `<prefix>_cancel_upgrade` 对应升级撤销语义；若目标协议或终端不支持撤销，库应返回 `IEC_STATUS_UNSUPPORTED` 或通过 `on_upgrade_result` 返回不支持结果。
 - `<prefix>_get_device_description` 支持 XML 或 msg 自描述内容。库内部可通过专用文件传输通道或扩展 ASDU 通道获取，上层只接收最终的结构化内容视图。
 - 即使 `<prefix>_get_device_description` 底层复用了文件传输通道，上层仍应优先使用专用自描述 API，而不是用通用文件 API 自行拼装终端模型文件读取过程。
 - 自描述文件建议控制在 64KB 以内。若终端返回分片内容，库内部负责重组，并通过 `iec_device_description_t.is_complete` 标记是否接收完成。
@@ -1537,18 +1941,18 @@ iec104_start(session);
 
 ### 7.2.1 安全 transport 接入流程
 
-协议库不直接依赖电科院安全接口库。启用安全通信时，上位机或安全适配层先完成 USB Key、身份认证和运维密钥协商，再向协议库传入安全 transport。
+协议库不直接依赖电科院安全接口库。按 0508 版运维工具侧安全接口库接入时，上位机或安全适配层先完成 USB Key、身份认证和运维密钥协商，再向协议库传入安全 transport。协议库始终只感知明文 transport。
 
 ```mermaid
 sequenceDiagram
     participant 应用 as 上层应用
     participant 安全 as 安全适配层
-    participant 安全库 as 电科院安全接口库
+    participant 安全库 as 运维工具侧安全接口库0508版
     participant 库 as 协议库
     participant 终端 as 配电终端
 
     应用->>安全: 打开USB Key并校验PIN
-    安全->>安全库: sec_lib_init
+    安全->>安全库: sec_lib_init(hDev, max_frame_len)
     应用->>安全: 打开串口/socket
     安全->>安全库: sec_auth_req / sec_auth_sign
     安全->>终端: 发送认证EB报文
@@ -1570,12 +1974,13 @@ sequenceDiagram
 
 安全适配层约束如下：
 
-- 安全适配层负责调用最新版本的电科院安全接口库，协议库只感知 transport。
+- 安全适配层负责调用 0508 版运维工具侧安全接口库，协议库只感知 `iec_transport_t` 中的明文 `send` 和 `recv`。
 - 每次身份认证成功后，安全适配层应执行运维密钥协商，再允许协议库启动业务流程。
 - 安全 transport 的 `send` 内部负责 `sec_encrypt_data` 和真实串口/socket 发送。
 - 安全 transport 的 `recv` 内部负责接收完整 EB 报文、调用 `sec_decrypt_data` 并返回明文协议帧。
 - 安全 transport 应将安全库原始错误码保留在诊断信息中，不应简单映射为协议错误。
 - 链路断开后，安全状态应失效；恢复业务前应重新建链、认证和密钥协商。
+- 证书导入、证书导出、终端初始证书回写、密钥恢复、USB Key 登录、软件授权、可信验签和安全审计属于安全适配层或上层工具职责；协议库不得直接导出 `sec_*`、`SG_*` 等安全库函数包装接口。
 
 ### 7.3 点表上报流程
 
@@ -1656,6 +2061,8 @@ static void on_raw_asdu(
 1. 推荐在调试、联调或特殊透传场景开启旁路。
 2. 回调中以轻量级拷贝或摘要记录为宜。
 3. 业务层如需长期保存报文，可立即复制 `payload`。
+4. 技术方案附录 F 的通信报文监视是终端侧串口/网口监视能力，通过 `0xF012`、`0xF013`、`0xF014`、`0xF015` 扩展参数交互，不等同于 `on_raw_asdu`。
+5. `on_raw_asdu` 只观察协议库自身收发的 ASDU 明文视图，不承诺提供终端侧串口/网口报文、EB 密文报文或明文/密文对照记录；若产品需要附录 F 报文监视，应在后续单独定义高层报文监视 API 或明确通过参数接口承载。
 
 ### 7.5 参数读取流程
 
@@ -1891,7 +2298,7 @@ sequenceDiagram
     participant 终端 as 配电终端
     participant 回调 as 文件目录回调
 
-    应用->>库: iec_list_files(session, request, &request_id)
+    应用->>库: <prefix>_list_files(session, request, &request_id)
     库-->>应用: IEC_STATUS_OK + request_id
     库->>终端: 发起文件目录召唤
     终端-->>库: 返回目录分帧
@@ -1907,7 +2314,7 @@ iec_file_list_request_t list_req = {
 };
 
 uint32_t list_request_id = 0;
-iec_list_files(session, &list_req, &list_request_id);
+m101_list_files(session, &list_req, &list_request_id);
 ```
 
 推荐处理步骤如下：
@@ -1999,17 +2406,17 @@ sequenceDiagram
 ```
 
 ```c
-const uint8_t *image = firmware_blob;
-uint32_t image_size = firmware_blob_size;
+const uint8_t *content = file_blob;
+uint32_t content_size = file_blob_size;
 
 iec_file_write_request_t write_req = {
     .common_address = 1,
-    .directory_name = "/upgrade",
-    .file_name = "fw.bin",
+    .directory_name = "/data",
+    .file_name = "record.dat",
     .start_offset = 0,
-    .total_size = image_size,
-    .content = image,
-    .content_size = image_size,
+    .total_size = content_size,
+    .content = content,
+    .content_size = content_size,
     .preferred_chunk_size = 1024,            /* 运维101场景下建议按 1024 字节窗口写入 */
     .overwrite_existing = 1
 };
@@ -2019,10 +2426,10 @@ m101_write_file(session, &write_req, &write_transfer_id);
 
 iec_file_transfer_status_t write_status;
 m101_get_file_transfer_status(session, write_transfer_id, &write_status);
-if (write_status.is_resumable && write_status.acknowledged_offset < image_size) {
+if (write_status.is_resumable && write_status.acknowledged_offset < content_size) {
     write_req.start_offset = write_status.acknowledged_offset;
-    write_req.content = image + write_status.acknowledged_offset;
-    write_req.content_size = image_size - write_status.acknowledged_offset;
+    write_req.content = content + write_status.acknowledged_offset;
+    write_req.content_size = content_size - write_status.acknowledged_offset;
     m101_write_file(session, &write_req, &write_transfer_id);
 }
 ```
@@ -2033,6 +2440,420 @@ if (write_status.is_resumable && write_status.acknowledged_offset < image_size) 
 2. 续传时只更新 `start_offset`、`content` 和 `content_size`，不要修改目标文件名和总大小。
 3. 运维101文件写入场景下建议以 `1024` 字节作为单块发送窗口上限，超过部分由库自动拆分并推进偏移。
 4. 文件写入最终成功、失败、取消或否定确认都以 `on_file_operation_result` 为准。
+
+### 7.12 程序升级流程
+
+以下流程以运维101库为例，展示程序升级高层状态机。升级包可信验签、MD5/SM3 校验和用户确认由上层在调用前完成。
+
+```mermaid
+sequenceDiagram
+    participant 应用 as 上层应用
+    participant 库 as 动态库
+    participant 终端 as 配电终端
+    participant 回调 as 升级回调
+
+    应用->>应用: 完成升级包选择、校验和可信验签
+    应用->>库: m101_upgrade_firmware(session, request, &upgrade_id)
+    库-->>应用: IEC_STATUS_OK + upgrade_id
+    库->>回调: on_upgrade_progress(STARTING)
+    库->>终端: 启动升级命令
+    库->>回调: on_upgrade_progress(WAIT_START_CONFIRM)
+    终端-->>库: 升级确认/否认
+    库->>回调: on_upgrade_progress(EXECUTING)
+    库->>终端: 升级执行命令
+    终端-->>库: 执行确认/否认
+    库->>回调: on_upgrade_progress(TRANSFERRING)
+    库->>应用: request.image.read(offset, buffer)
+    库->>终端: 写文件分块, 支持断点续传
+    终端-->>库: 写文件确认
+    库->>回调: on_upgrade_progress(FINISHING)
+    库->>终端: 升级结束命令
+    终端-->>库: 升级结束确认
+    库->>回调: on_upgrade_result(COMPLETED)
+```
+
+```c
+typedef struct firmware_image {
+    const uint8_t *data;
+    uint32_t size;
+    const char *md5_text;
+} firmware_image_t;
+
+static int read_upgrade_chunk(
+    void *ctx,
+    uint32_t offset,
+    uint8_t *buffer,
+    uint32_t capacity,
+    uint32_t *out_len)
+{
+    const firmware_image_t *image = (const firmware_image_t *)ctx;
+    if (offset >= image->size) {
+        *out_len = 0;
+        return 0;
+    }
+
+    uint32_t remain = image->size - offset;
+    uint32_t n = remain < capacity ? remain : capacity;
+    memcpy(buffer, image->data + offset, n);
+    *out_len = n;
+    return 0;
+}
+
+iec_upgrade_request_t upgrade_req = {
+    .common_address = 1,
+    .remote_directory = "/upgrade",
+    .remote_file_name = "fw.bin",
+    .image = {
+        .ctx = &firmware_image,
+        .total_size = firmware_image.size,
+        .read = read_upgrade_chunk
+    },
+    .preferred_chunk_size = 1024,
+    .checksum_text = firmware_image.md5_text,
+    .overwrite_existing = 1,
+    .command_timeout_ms = 3000,
+    .transfer_timeout_ms = 30000
+};
+
+uint32_t upgrade_id = 0;
+m101_upgrade_firmware(session, &upgrade_req, &upgrade_id);
+```
+
+推荐处理步骤如下：
+
+1. 调用前由上层完成升级包来源校验、可信验签、散列计算和用户确认。
+2. `iec_upgrade_image_source_t.read` 必须能够按任意已确认偏移读取升级包内容，以支持断点续传。
+3. 升级进度只以 `on_upgrade_progress` 为准；最终完成、失败或取消只以 `on_upgrade_result` 为准。
+4. 若用户取消升级，调用 `<prefix>_cancel_upgrade`，库内部负责发送升级撤销命令或返回不支持结果。
+5. 升级成功后终端可能自动重启，链路断开应通过 `on_link_event` 独立上报。
+
+### 7.13 恢复出厂设置与设备重启流程
+
+以下流程以运维101库为例，展示恢复出厂设置这类扩展遥控的调用边界。技术方案将恢复出厂设置定义为单点或双点遥控，且以“遥控合闸”语义触发，因此协议库不新增独立恢复出厂设置函数。
+
+```mermaid
+sequenceDiagram
+    participant 指令 as 用户或外部系统
+    participant 应用 as 上层应用
+    participant 库 as 动态库
+    participant 终端 as 配电终端
+    participant 回调 as 回调
+
+    指令->>应用: 恢复出厂设置/设备重启操作指令
+    应用->>应用: 二次确认、权限校验、安全闭锁、审计记录
+    应用->>库: m101_control_point(session, request, &command_id)
+    库-->>应用: IEC_STATUS_OK + command_id
+    库->>终端: 遥控选择/执行或直接执行
+    终端-->>库: 确认/否认
+    库->>回调: on_command_result(command_id)
+    终端-->>库: 可选链路断开或复位事件
+    库->>回调: on_link_event(DISCONNECTED/REMOTE_RESET)
+    应用->>库: 链路恢复后重新总召、读取参数或获取自描述
+```
+
+```c
+/* factory_reset_addr 来自终端自描述、点表模板或技术方案附录 G 的扩展遥控配置。 */
+uint32_t factory_reset_addr = 0;
+
+iec_command_request_t factory_reset_req = {
+    .address = {
+        .common_address = 1,
+        .information_object_address = factory_reset_addr,
+        .type_id = 0,
+        .cause_of_transmission = 0,
+        .originator_address = 0
+    },
+    .command_type = IEC_COMMAND_DOUBLE,
+    .semantic = IEC_COMMAND_SEMANTIC_FACTORY_RESET,
+    .mode = IEC_COMMAND_MODE_SELECT,
+    .qualifier = 0,
+    .execute_on_ack = 1,
+    .timeout_ms = 3000,
+    .value.doubled = 2 /* 合闸/执行语义，实际取值以终端点表定义为准。 */
+};
+
+uint32_t command_id = 0;
+m101_control_point(session, &factory_reset_req, &command_id);
+```
+
+推荐处理步骤如下：
+
+1. 上层收到恢复出厂设置或设备重启指令后，先完成操作确认、权限校验、安全闭锁和审计记录，再调用 `<prefix>_control_point`。
+2. 恢复出厂设置使用 `IEC_COMMAND_SEMANTIC_FACTORY_RESET`，设备重启或复位进程使用 `IEC_COMMAND_SEMANTIC_DEVICE_REBOOT`。
+3. 命令类型仍按终端点表选择 `IEC_COMMAND_SINGLE` 或 `IEC_COMMAND_DOUBLE`，命令值按终端定义的合闸/执行语义填写。
+4. `on_command_result` 表示终端对遥控命令的确认、否认或超时，不表示恢复后参数已经重新读取完成。
+5. 若终端重启或恢复出厂设置导致链路断开，上层应等待 `on_link_event` 和重连流程完成后重新总召、读取参数或获取自描述内容。
+
+### 7.14 时钟读取流程
+
+```mermaid
+sequenceDiagram
+    participant 应用 as 上层应用
+    participant 库 as 动态库
+    participant 终端 as 配电终端
+    participant 回调 as 时钟回调
+
+    应用->>库: m101_read_clock(session, request, &request_id)
+    库-->>应用: IEC_STATUS_OK + request_id
+    库->>终端: 读取终端当前时间
+    终端-->>库: 返回终端时标或否定确认
+    库->>回调: on_clock_result(result)
+```
+
+```c
+static void on_clock_result(
+    iec_session_t *session,
+    const iec_clock_result_t *result,
+    void *user_context)
+{
+    (void)session;
+    (void)user_context;
+
+    if (result->operation == IEC_CLOCK_OPERATION_READ &&
+        result->result == IEC_CLOCK_RESULT_ACCEPTED &&
+        result->has_timestamp) {
+        /* 将 result->timestamp 拷贝到业务线程，用于展示或与本机时间比较。 */
+    }
+}
+
+iec_clock_read_request_t read_clock_req = {
+    .common_address = 1
+};
+
+uint32_t request_id = 0;
+m101_read_clock(session, &read_clock_req, &request_id);
+```
+
+推荐处理步骤如下：
+
+1. 主动读取终端当前时间使用 `<prefix>_read_clock`，校时使用 `<prefix>_clock_sync`。
+2. 两类操作都通过 `on_clock_result` 返回最终结果。
+3. 读时钟成功时，`iec_clock_result_t.has_timestamp` 为真，`timestamp` 字段携带终端当前时间。
+4. 若目标协议或终端不支持主动读时钟，库应返回 `IEC_STATUS_UNSUPPORTED` 或通过 `IEC_CLOCK_RESULT_UNSUPPORTED` 上报。
+
+### 7.15 配置校验、运行期选项与状态查询流程
+
+本流程用于覆盖创建前配置静态校验、运行期间选项调整和会话状态查询。配置校验函数是具体协议前缀函数，不使用 `<prefix>` 占位写法。
+
+```mermaid
+sequenceDiagram
+    participant 应用 as 上层应用
+    participant 库 as 动态库
+    participant 回调 as 日志/状态回调
+
+    应用->>库: iec101_validate_config(cfg101)
+    库-->>应用: IEC_STATUS_OK
+    应用->>库: iec101_create(common, cfg101, transport, cbs, &session)
+    库-->>应用: IEC_STATUS_OK + session
+    应用->>库: <prefix>_set_option(session, IEC_OPTION_ENABLE_RAW_ASDU, &enabled, sizeof(enabled))
+    库-->>应用: IEC_STATUS_OK
+    应用->>库: <prefix>_get_runtime_state(session, &state)
+    库-->>应用: IEC_STATUS_OK + state
+    库->>回调: on_log / on_session_state
+```
+
+```c
+iec_status_t st = iec101_validate_config(&cfg101);
+if (st != IEC_STATUS_OK) {
+    /* 配置静态校验失败, 不应继续 create。 */
+}
+
+iec101_create(&common, &cfg101, &transport, &cbs, &session);
+
+uint8_t enabled = 1;
+iec101_set_option(
+    session,
+    IEC_OPTION_ENABLE_RAW_ASDU,
+    &enabled,
+    sizeof(enabled));
+
+iec_runtime_state_t state = IEC_RUNTIME_CREATED;
+iec101_get_runtime_state(session, &state);
+```
+
+推荐处理步骤如下：
+
+1. 创建会话前可调用 `iec101_validate_config`、`m101_validate_config` 或 `iec104_validate_config` 做静态校验。
+2. `<prefix>_set_option` 只用于文档声明允许运行期修改的选项，不能替代 `<prefix>_create` 阶段确定的协议字段长度、transport 和回调集合。
+3. `<prefix>_get_runtime_state` 返回调用时刻的本地状态快照，不保证状态在返回后保持不变。
+4. 若选项修改会影响回调行为，上层应在业务侧记录配置变更时间点，便于排查联调问题。
+
+### 7.16 会话停止与销毁流程
+
+本流程用于覆盖正常退出路径。停止会话和释放会话句柄是两个独立步骤，调用方应先停止再销毁。
+
+```mermaid
+sequenceDiagram
+    participant 应用 as 上层应用
+    participant 库 as 动态库
+    participant 线程 as 工作线程
+    participant 回调 as 回调通道
+
+    应用->>库: <prefix>_get_runtime_state(session, &state)
+    库-->>应用: IEC_STATUS_OK + RUNNING
+    应用->>库: <prefix>_stop(session, timeout_ms)
+    库->>线程: 请求工作线程退出
+    线程-->>库: 收敛收发循环并释放运行期资源
+    库->>回调: on_session_state(STOPPING/STOPPED)
+    库-->>应用: IEC_STATUS_OK
+    应用->>库: <prefix>_destroy(session)
+    库-->>应用: IEC_STATUS_OK
+```
+
+```c
+iec_runtime_state_t state;
+iec101_get_runtime_state(session, &state);
+
+if (state == IEC_RUNTIME_RUNNING) {
+    iec101_stop(session, 5000);
+}
+
+iec101_destroy(session);
+session = NULL;
+```
+
+推荐处理步骤如下：
+
+1. `<prefix>_stop` 负责退出工作线程和运行期协议流程，`<prefix>_destroy` 负责释放会话对象。
+2. `<prefix>_stop` 返回超时时，上层应避免立即释放 transport 真实通信资源，可先根据状态和日志确认线程是否仍在退出。
+3. `<prefix>_destroy` 成功后句柄立即失效，上层必须清空或移除缓存的 `iec_session_t *`。
+4. 若会话处于 `IEC_RUNTIME_FAULTED`，仍可按停止、销毁路径收敛资源；是否重建会话由上层决定。
+
+### 7.17 总召、电度量召唤与单点读取流程
+
+本流程用于覆盖主动获取点表数据的三类入口。持续上送走 `on_point_indication`，主动召唤和单点读取也通过同一个点表回调返回高层点值。
+
+```mermaid
+sequenceDiagram
+    participant 应用 as 上层应用
+    participant 库 as 动态库
+    participant 终端 as 配电终端
+    participant 回调 as 点表回调
+
+    应用->>库: <prefix>_general_interrogation(session, request)
+    库-->>应用: IEC_STATUS_OK
+    库->>终端: 总召命令
+    终端-->>库: 返回遥信/遥测分帧
+    库->>回调: on_point_indication(address, value)
+    应用->>库: <prefix>_counter_interrogation(session, counter_request)
+    库->>终端: 电度量召唤
+    终端-->>库: 返回累计量
+    库->>回调: on_point_indication(address, value)
+    应用->>库: <prefix>_read_point(session, address)
+    库->>终端: 读取单个对象
+    终端-->>库: 返回目标点值
+    库->>回调: on_point_indication(address, value)
+```
+
+```c
+iec_interrogation_request_t gi_req = {
+    .common_address = 1,
+    .qualifier = 20
+};
+iec101_general_interrogation(session, &gi_req);
+
+iec_counter_interrogation_request_t ci_req = {
+    .common_address = 1,
+    .qualifier = 5,
+    .freeze = 0
+};
+iec101_counter_interrogation(session, &ci_req);
+
+iec_point_address_t point_addr = {
+    .common_address = 1,
+    .information_object_address = 0x4001,
+    .type_id = 0,
+    .cause_of_transmission = 0,
+    .originator_address = 0
+};
+iec101_read_point(session, &point_addr);
+```
+
+推荐处理步骤如下：
+
+1. 建链完成或缓存失效后优先使用 `<prefix>_general_interrogation` 刷新全量点表状态。
+2. 电度量或累计量刷新使用 `<prefix>_counter_interrogation`，不要用普通总召替代电度量召唤语义。
+3. 对少量点位人工刷新或诊断时使用 `<prefix>_read_point`。
+4. 三类请求的同步返回只表示请求被接收，业务结果仍以 `on_point_indication` 和链路事件为准。
+
+### 7.18 原始 ASDU 主动发送流程
+
+本流程用于覆盖 `<prefix>_send_raw_asdu`。该接口仅面向联调、扩展报文验证或受控透传，不作为常规业务主路径。
+
+```mermaid
+sequenceDiagram
+    participant 应用 as 上层应用
+    participant 库 as 动态库
+    participant 对端 as 远端对端
+    participant 回调 as 原始ASDU回调
+
+    应用->>库: <prefix>_set_option(session, IEC_OPTION_ENABLE_RAW_ASDU, &enabled, sizeof(enabled))
+    应用->>库: <prefix>_send_raw_asdu(session, request)
+    库-->>应用: IEC_STATUS_OK
+    库->>对端: 发送原始 ASDU
+    库->>回调: on_raw_asdu(TX)
+    对端-->>库: 可选应答 ASDU
+    库->>回调: on_raw_asdu(RX)
+```
+
+```c
+static const uint8_t payload[] = {
+    0x64, 0x01, 0x06, 0x00, 0x01, 0x00
+};
+
+iec_raw_asdu_tx_t raw_req = {
+    .payload = payload,
+    .payload_size = sizeof(payload),
+    .bypass_high_level_validation = 0
+};
+
+iec101_send_raw_asdu(session, &raw_req);
+```
+
+推荐处理步骤如下：
+
+1. 使用前应明确开启原始 ASDU 旁路或注册 `on_raw_asdu`，便于观察发送和对端响应。
+2. 默认保持 `bypass_high_level_validation = 0`，仅在明确验证厂商扩展报文时再开启绕过高层对象约束。
+3. `<prefix>_send_raw_asdu` 不应替代点表、参数、文件、升级或时钟等高层接口。
+4. 原始 ASDU 旁路只观察协议库自身收发的明文 ASDU，不覆盖安全 EB 密文报文或终端侧串口/网口监视。
+
+### 7.19 文件传输取消流程
+
+本流程用于覆盖正在进行的文件读写取消。目录召唤通常通过请求超时或最终结果收敛；读写传输可通过传输 ID 主动取消。
+
+```mermaid
+sequenceDiagram
+    participant 应用 as 上层应用
+    participant 库 as 动态库
+    participant 终端 as 配电终端
+    participant 回调 as 文件结果回调
+
+    应用->>库: <prefix>_read_file(session, request, &transfer_id)
+    库-->>应用: IEC_STATUS_OK + transfer_id
+    库->>终端: 文件传输进行中
+    应用->>库: <prefix>_cancel_file_transfer(session, transfer_id)
+    库-->>应用: IEC_STATUS_OK
+    库->>终端: 可选发送取消/终止传输语义
+    库->>回调: on_file_operation_result(CANCEL, CANCELED)
+```
+
+```c
+uint32_t transfer_id = 0;
+m101_read_file(session, &read_req, &transfer_id);
+
+/* 用户取消、链路策略切换或业务超时后发起取消。 */
+m101_cancel_file_transfer(session, transfer_id);
+
+iec_file_transfer_status_t status;
+m101_get_file_transfer_status(session, transfer_id, &status);
+```
+
+推荐处理步骤如下：
+
+1. 只有已获得 `transfer_id` 的文件读取或写入请求才适合调用 `<prefix>_cancel_file_transfer`。
+2. 取消请求同步返回 `IEC_STATUS_OK` 只表示库已接受取消动作，最终状态以 `on_file_operation_result` 为准。
+3. 取消后可通过 `<prefix>_get_file_transfer_status` 查询本地快照，用于展示已确认偏移或判断是否允许后续续传。
+4. 若目标协议或终端不支持显式取消，库应返回 `IEC_STATUS_UNSUPPORTED` 或通过文件结果回调给出不支持/失败诊断。
 
 ## 8. 运行约束与设计说明
 
@@ -2053,6 +2874,7 @@ if (write_status.is_resumable && write_status.acknowledged_offset < image_size) 
 - 用户传入的字符串参数在对应 API 返回前必须有效，返回后是否长期保留由库内部拷贝决定。
 - 回调收到的事件数据由动态库持有，在回调执行窗口内供调用方读取和拷贝。
 - 文件写入请求中的 `content` 只表达本次待发送窗口；调用方可选择一次性提供完整内容，也可在续传场景下提供剩余窗口。
+- 程序升级请求中的 `iec_upgrade_image_source_t.ctx` 和 `read` 回调由上层持有，必须在 `on_upgrade_result` 最终回调前保持有效。
 - 接口返回模式统一采用调用方缓冲区和回调只读视图。
 
 ### 8.3 错误处理约束
@@ -2074,6 +2896,8 @@ if (write_status.is_resumable && write_status.acknowledged_offset < image_size) 
 - 命令应答结果。
 - 参数写入、参数校验和定值区切换结果。
 - 文件目录召唤、文件读取、文件写入和取消结果。
+- 程序升级阶段进度、完成、失败和取消结果。
+- 校时和时钟读取结果。
 - 日志和告警信息。
 
 推荐约定如下：
@@ -2082,6 +2906,8 @@ if (write_status.is_resumable && write_status.acknowledged_offset < image_size) 
 - 命令下发最终结果以 `on_command_result` 为准。
 - 参数写入、参数校验和定值区切换最终结果以 `on_parameter_result` 为准。
 - 文件目录、文件读取、文件写入和取消最终结果以 `on_file_operation_result` 为准；若出现协议否定确认、传送原因异常或厂商扩展错误，应优先读取其中的诊断字段。
+- 程序升级最终结果以 `on_upgrade_result` 为准；升级状态机中的文件传输细节由 `on_upgrade_progress` 汇总呈现。
+- 校时和时钟读取最终结果以 `on_clock_result` 为准。
 - 运行期链路变化和协议事件通过异步回调通知上层。
 
 ### 8.4 高层数据主路径与原始旁路关系
@@ -2089,7 +2915,10 @@ if (write_status.is_resumable && write_status.acknowledged_offset < image_size) 
 - 高层点表接口是默认主路径，业务系统应优先依赖 `on_point_indication`。
 - 参数接口是独立主路径，参数读取和参数写入不应通过点表接口或遥控接口拼装实现。
 - 文件接口是独立主路径，目录召唤、文件传输和断点续传不应通过 `<prefix>_send_raw_asdu` 或自定义旁路报文暴露给上层。
+- 程序升级接口是独立高层主路径，启动升级、执行升级、文件写入和升级结束不应要求上层手工拼装多个底层调用。
+- 时钟接口是独立主路径，校时和读取终端当前时间不应通过 `<prefix>_send_raw_asdu` 或参数接口拼装实现。
 - 原始 ASDU 旁路作为调试抓包、扩展报文观察和受控透传通道。
+- 原始 ASDU 旁路不等同于技术方案附录 F 的终端侧通信报文监视；后者涉及终端监视串口/网口报文以及明文/密文对照展示，应由独立高层报文监视能力或上层/安全适配层承接。
 - 即使开启原始 ASDU 旁路，高层解码成功的报文仍继续生成高层事件。
 - `bypass_high_level_validation` 作用于高层对象约束，协议帧基础合法性检查保持有效。
 
@@ -2097,26 +2926,15 @@ if (write_status.is_resumable && write_status.acknowledged_offset < image_size) 
 
 - 动态库负责参数读取、参数写入、回读校验、定值区切换、自描述获取以及协议字段与高层参数对象之间的映射。
 - 动态库负责文件目录召唤、文件读取、文件写入、传输状态维护、取消和断点续传恢复点管理。
+- 动态库负责程序升级协议状态机、升级命令封装、文件写入阶段编排、升级结束命令和升级结果归并。
+- 动态库负责校时和读取终端当前时间的协议交互以及结果回调。
 - 参数模板文件的导入、导出、版本管理和落盘由上层应用负责，不纳入动态库职责范围。
-- 本地文件的落盘、缓存目录管理、升级包来源校验和断点内容持久化由上层应用负责，不纳入动态库职责范围。
+- 本地文件的落盘、缓存目录管理、升级包来源校验、可信验签、散列计算和断点内容持久化由上层应用负责，不纳入动态库职责范围。
+- 证书导入导出、终端初始证书回写、密钥恢复、USB Key 登录、软件授权、可信验签和安全审计由安全适配层或上层应用负责，不纳入协议层 SDK 职责范围。
 - 自描述内容的 XML 或 msg 解析、参数分组展示、界面控件生成和参数变更审计由上层应用负责。
 - 无线模块、电源模块、线损模块在接口层统一视为参数域，避免为具体业务模块重复设计函数族。
 - `<prefix>_read_point` 适合点表对象读取，不负责表达“读取全部运行参数”“读取某定值区全部参数”这类参数语义。
-- `<prefix>_control_point` 适合遥控和设定值命令，不承担模板下发、参数批量写入和回读校验职责。
+- 点表在线读取、修改和点表模板下发校验属于参数接口范畴，使用 `IEC_PARAMETER_SCOPE_POINT_TABLE` 表达点表配置域；实时点值召测和上送仍属于点表接口范畴。
+- `<prefix>_control_point` 适合遥控、设定值命令、恢复出厂设置和设备重启等以遥控格式承载的扩展运维命令，不承担模板下发、参数批量写入和回读校验职责。
+- 恢复出厂设置和设备重启的操作确认、权限控制、安全闭锁、无线运维模式限制和审计落库属于上层应用职责；动态库只负责已确认命令的协议封装、发送、确认/否认解析和结果回调。
 - 通用文件 API 负责目录、数据块和续传偏移等高层文件语义；`<prefix>_get_device_description` 继续承担终端模型文件的专用获取入口。
-
-## 9. 头文件组织建议
-
-建议对外头文件按以下方式拆分：
-
-- `include/iec/iec_types.h`
-- `include/iec/m101_api.h`
-- `include/iec/iec101_api.h`
-- `include/iec/iec104_api.h`
-
-建议组织原则如下：
-
-- `iec_types.h` 放公共枚举、结构体、transport、参数对象、文件对象和回调类型。
-- `m101_api.h` 放运维101导出函数、扩展配置、校验函数和未来专用能力。
-- `iec101_api.h` 放标准101导出函数、扩展配置、校验函数和未来专用能力。
-- `iec104_api.h` 放标准104导出函数、扩展配置、校验函数和未来专用能力。
