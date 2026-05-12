@@ -133,6 +133,14 @@ table {
   font-size: 9.8pt;
 }
 
+tr > :first-child:nth-last-child(2) {
+  width: 22%;
+}
+
+tr > :nth-child(2):last-child {
+  width: 78%;
+}
+
 thead {
   display: table-header-group;
 }

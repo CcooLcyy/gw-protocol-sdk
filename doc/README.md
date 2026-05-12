@@ -7,15 +7,17 @@
 - `api/`：我方维护的接口设计、SDK 设计和协议层 API 文档。
 - `external/`：外部正式提供的原始资料，保留原始文件并纳入 Git 追踪。
 - `generated/`：由源文档导出的 PDF 等生成件。
+- `scripts/`：文档构建、导出和校验脚本。
+- `tools/pdf/`：PDF 导出链路使用的样式文件和渲染配置。
 - `tmp/`：文档构建中间目录，由脚本自动创建，默认不纳入版本控制。
 - `文件分类记录.md`：`doc/` 目录文件分类台账。
 
 ## PDF 生成
 
-默认从 `api/dtu_unified_maintenance_sdk_api_design.md` 生成 PDF 到 `generated/`：
+默认从 `api/dtu_unified_maintenance_sdk_api_design.md` 生成 PDF 到 `generated/动态库协议接口.pdf`：
 
 ```bash
-bash scripts/build_doc_pdf.sh
+bash doc/scripts/build_doc_pdf.sh
 ```
 
 脚本运行时会把 HTML、Mermaid SVG、基础 PDF 等中间文件写入 `doc/tmp/build_pdf/`。

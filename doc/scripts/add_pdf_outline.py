@@ -144,6 +144,10 @@ def main() -> int:
     output_pdf = Path(sys.argv[3])
 
     headings = parse_headings(markdown_path)
+    if not headings:
+        print(f"error: no headings found in markdown: {markdown_path}", file=sys.stderr)
+        return 1
+
     reader = PdfReader(str(input_pdf))
     writer = PdfWriter()
 
