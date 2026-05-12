@@ -9,3 +9,5 @@ node_modules/
 .DS_Store
 output/pdf/*.pdf
 doc/配电终端统一运维技术方案20260413.docx
+doc/generated/dtu_unified_maintenance_sdk_api_design.docx
+doc/generated/动态库协议接口.pdf
