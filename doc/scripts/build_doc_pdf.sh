@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DOC_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_ROOT="$(cd "${DOC_ROOT}/.." && pwd)"
 
-DEFAULT_INPUT="${DOC_ROOT}/api/dtu_unified_maintenance_sdk_api_design.md"
+DEFAULT_INPUT="${DOC_ROOT}/api/gw_protocol_sdk_api_design.md"
 INPUT_PATH="${1:-${DEFAULT_INPUT}}"
 
 if [[ ! -f "${INPUT_PATH}" ]]; then
@@ -20,7 +20,7 @@ DOC_BASENAME="$(basename "${INPUT_ABS}" .md)"
 if [[ $# -ge 2 ]]; then
   OUTPUT_PATH="${2}"
 elif [[ "${INPUT_ABS}" == "${DEFAULT_INPUT_ABS}" ]]; then
-  OUTPUT_PATH="${DOC_ROOT}/generated/动态库协议接口.pdf"
+  OUTPUT_PATH="${DOC_ROOT}/generated/gw_protocol_sdk_api_design.pdf"
 else
   OUTPUT_PATH="${DOC_ROOT}/generated/${DOC_BASENAME}.pdf"
 fi

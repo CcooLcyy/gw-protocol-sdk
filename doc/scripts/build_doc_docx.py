@@ -322,7 +322,7 @@ def main() -> int:
     script_dir = Path(__file__).resolve().parent
     doc_root = script_dir.parent
     repo_root = doc_root.parent
-    default_input = doc_root / "api" / "dtu_unified_maintenance_sdk_api_design.md"
+    default_input = doc_root / "api" / "gw_protocol_sdk_api_design.md"
 
     parser = argparse.ArgumentParser(description="Build a Word document with API-friendly table layout.")
     parser.add_argument("input", nargs="?", type=Path, default=default_input)

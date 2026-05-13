@@ -1,6 +1,6 @@
-# dtu-unified-maintenance-sdk
+# gw-protocol-sdk
 
-配电终端统一运维工具协议层 SDK 仓库，用于沉淀 `IEC 60870-5-101` / `IEC 60870-5-104` 跨平台动态库接口设计、头文件规划、示例和可分发文档。
+配电终端协议层 SDK 仓库，用于沉淀运维101、`IEC 60870-5-101` / `IEC 60870-5-104` 跨平台动态库接口设计、头文件规划、示例和可分发文档。
 
 目标动态库产物包括：
 
@@ -18,8 +18,12 @@
 
 ## 当前主文档
 
-- Markdown 源文件：`doc/api/dtu_unified_maintenance_sdk_api_design.md`
-- 导出 PDF：`doc/generated/动态库协议接口.pdf`
+- Markdown 源文件：`doc/api/gw_protocol_sdk_api_design.md`
+- 默认导出 PDF：`doc/generated/gw_protocol_sdk_api_design.pdf`
+
+## 当前实现范围
+
+当前代码阶段只公开并实现三套协议库的配置校验、会话创建/销毁、运行状态查询、运行选项设置、启动和停止接口。接口设计文档中的业务操作 API 仍属于设计草案，进入实现阶段后再同步加入 public header、导出清单和发布检查。
 
 ## 快速生成 PDF
 
@@ -32,7 +36,7 @@ bash doc/scripts/build_doc_pdf.sh
 也可以指定输入和输出路径：
 
 ```bash
-bash doc/scripts/build_doc_pdf.sh doc/api/dtu_unified_maintenance_sdk_api_design.md doc/generated/动态库协议接口.pdf
+bash doc/scripts/build_doc_pdf.sh doc/api/gw_protocol_sdk_api_design.md doc/generated/gw_protocol_sdk_api_design.pdf
 ```
 
 ## 依赖

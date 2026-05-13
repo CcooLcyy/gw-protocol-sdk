@@ -1,0 +1,31 @@
+# Release API export manifest.
+# Format: <target>:<symbol>
+#
+# Current implementation stage: lifecycle and configuration APIs only.
+
+# GW_m101 exports
+GW_m101:m101_create
+GW_m101:m101_destroy
+GW_m101:m101_start
+GW_m101:m101_stop
+GW_m101:m101_get_runtime_state
+GW_m101:m101_set_option
+GW_m101:m101_validate_config
+
+# GW_iec101 exports
+GW_iec101:iec101_create
+GW_iec101:iec101_destroy
+GW_iec101:iec101_start
+GW_iec101:iec101_stop
+GW_iec101:iec101_get_runtime_state
+GW_iec101:iec101_set_option
+GW_iec101:iec101_validate_config
+
+# GW_iec104 exports
+GW_iec104:iec104_create
+GW_iec104:iec104_destroy
+GW_iec104:iec104_start
+GW_iec104:iec104_stop
+GW_iec104:iec104_get_runtime_state
+GW_iec104:iec104_set_option
+GW_iec104:iec104_validate_config

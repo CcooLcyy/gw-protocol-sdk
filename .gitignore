@@ -1,5 +1,24 @@
 tmp/
 doc/tmp/
+
+# Build output
+build/
+cmake-build-*/
+out/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+DartConfiguration.tcl
+Testing/
+install_manifest.txt
+compile_commands.json
+
+# Local IDE / tool state
+.vscode/
+.vs/
+*.user
+
 __pycache__/
 *.pyc
 *.pyo
@@ -9,5 +28,5 @@ node_modules/
 .DS_Store
 output/pdf/*.pdf
 doc/配电终端统一运维技术方案20260413.docx
-doc/generated/dtu_unified_maintenance_sdk_api_design.docx
-doc/generated/动态库协议接口.pdf
+doc/generated/*.docx
+doc/generated/*.pdf

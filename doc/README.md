@@ -14,7 +14,7 @@
 
 ## PDF 生成
 
-默认从 `api/dtu_unified_maintenance_sdk_api_design.md` 生成 PDF 到 `generated/动态库协议接口.pdf`：
+默认从 `api/gw_protocol_sdk_api_design.md` 生成 PDF 到 `generated/gw_protocol_sdk_api_design.pdf`：
 
 ```bash
 bash doc/scripts/build_doc_pdf.sh

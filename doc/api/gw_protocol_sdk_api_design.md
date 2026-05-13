@@ -8,7 +8,7 @@
 
 ## 1. 文档目的
 
-本文档定义 `dtu-unified-maintenance-sdk` 的运维101、`IEC 60870-5-101`、`IEC 60870-5-104` 协议层动态库接口草案，用于接口冻结、实现对齐和跨平台交付。
+本文档定义 `gw-protocol-sdk` 的运维101、`IEC 60870-5-101`、`IEC 60870-5-104` 协议层动态库接口草案，用于接口冻结、实现对齐和跨平台交付。
 
 当前阶段优先交付 Windows `.dll`；后续可按同一 ABI 思路扩展 Linux `.so` 产物。接口设计需避免绑定 Windows 专用类型。
 
@@ -42,7 +42,7 @@
 
 ### 3.1 整体架构与职责边界
 
-![配电终端统一运维协议层 SDK 整体架构](../generated/dtu_sdk_overall_architecture.png)
+![配电终端统一运维协议层 SDK 整体架构](../generated/gw_protocol_sdk_overall_architecture.png)
 
 上图用于说明协议层 SDK 在统一运维工具中的位置和边界。图中的模块划分表达职责归属，不要求所有模块必须拆成独立进程或独立动态库。
 
