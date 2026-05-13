@@ -1,7 +1,10 @@
-#ifndef GW_PROTOCOL_SDK_H
-#define GW_PROTOCOL_SDK_H
+#ifndef GW_IEC101_H
+#define GW_IEC101_H
 
 #include <stdint.h>
+
+#ifndef GW_PROTOCOL_COMMON_DECLARATIONS
+#define GW_PROTOCOL_COMMON_DECLARATIONS
 
 #if defined(_WIN32)
 #if defined(GW_PROTOCOL_SDK_IMPORT)
@@ -90,10 +93,42 @@ typedef struct iec_session_config {
     uint8_t initial_log_level;
 } iec_session_config_t;
 
+typedef void(GW_PROTOCOL_CALL *iec_on_session_state_fn)(
+    iec_session_t *session,
+    iec_runtime_state_t state,
+    void *user_context);
+
+typedef struct iec_callbacks {
+    iec_on_session_state_fn on_session_state;
+} iec_callbacks_t;
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif
+
+#ifndef GW_PROTOCOL_IEC101_LINK_MODE_DECLARATION
+#define GW_PROTOCOL_IEC101_LINK_MODE_DECLARATION
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef enum iec101_link_mode {
     IEC101_LINK_MODE_UNBALANCED = 1,
     IEC101_LINK_MODE_BALANCED = 2
 } iec101_link_mode_t;
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 typedef struct iec101_master_config {
     iec101_link_mode_t link_mode;
@@ -108,59 +143,25 @@ typedef struct iec101_master_config {
     uint32_t repeat_count;
 } iec101_master_config_t;
 
-typedef struct m101_master_config {
-    iec101_link_mode_t link_mode;
-    uint16_t link_address;
-    uint8_t link_address_length;
-    uint8_t common_address_length;
-    uint8_t information_object_address_length;
-    uint8_t cot_length;
-    uint8_t use_single_char_ack;
-    uint32_t ack_timeout_ms;
-    uint32_t repeat_timeout_ms;
-    uint32_t repeat_count;
-    uint32_t preferred_file_chunk_size;
-} m101_master_config_t;
-
-typedef struct iec104_master_config {
-    uint8_t common_address_length;
-    uint8_t information_object_address_length;
-    uint8_t cot_length;
-    uint16_t k;
-    uint16_t w;
-    uint32_t t0_ms;
-    uint32_t t1_ms;
-    uint32_t t2_ms;
-    uint32_t t3_ms;
-} iec104_master_config_t;
-
-typedef void(GW_PROTOCOL_CALL *iec_on_session_state_fn)(
-    iec_session_t *session,
-    iec_runtime_state_t state,
-    void *user_context);
-
-typedef struct iec_callbacks {
-    iec_on_session_state_fn on_session_state;
-} iec_callbacks_t;
-
 #ifndef GW_PROTOCOL_SDK_NO_API_DECLARATIONS
-#define GW_DECLARE_PREFIX_API(prefix) \
-    GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL prefix##_create(const iec_session_config_t *config, const void *protocol_config, const iec_transport_t *transport, const iec_callbacks_t *callbacks, iec_session_t **out_session); \
-    GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL prefix##_destroy(iec_session_t *session); \
-    GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL prefix##_get_runtime_state(const iec_session_t *session, iec_runtime_state_t *out_state); \
-    GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL prefix##_set_option(iec_session_t *session, iec_option_t option, const void *value, uint32_t value_size); \
-    GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL prefix##_start(iec_session_t *session); \
-    GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL prefix##_stop(iec_session_t *session, uint32_t timeout_ms)
-
-GW_DECLARE_PREFIX_API(m101);
-GW_DECLARE_PREFIX_API(iec101);
-GW_DECLARE_PREFIX_API(iec104);
-
-GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL m101_validate_config(const m101_master_config_t *config);
+GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL iec101_create(
+    const iec_session_config_t *config,
+    const void *protocol_config,
+    const iec_transport_t *transport,
+    const iec_callbacks_t *callbacks,
+    iec_session_t **out_session);
+GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL iec101_destroy(iec_session_t *session);
+GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL iec101_get_runtime_state(
+    const iec_session_t *session,
+    iec_runtime_state_t *out_state);
+GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL iec101_set_option(
+    iec_session_t *session,
+    iec_option_t option,
+    const void *value,
+    uint32_t value_size);
+GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL iec101_start(iec_session_t *session);
+GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL iec101_stop(iec_session_t *session, uint32_t timeout_ms);
 GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL iec101_validate_config(const iec101_master_config_t *config);
-GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL iec104_validate_config(const iec104_master_config_t *config);
-
-#undef GW_DECLARE_PREFIX_API
 #endif
 
 #ifdef __cplusplus

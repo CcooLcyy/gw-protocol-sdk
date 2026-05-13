@@ -1,7 +1,9 @@
 #ifndef GW_PROTOCOL_SESSION_HPP
 #define GW_PROTOCOL_SESSION_HPP
 
-#include "gw_protocol_sdk.h"
+#include "gw_iec101.h"
+#include "gw_iec104.h"
+#include "gw_m101.h"
 
 namespace gw::protocol {
 
