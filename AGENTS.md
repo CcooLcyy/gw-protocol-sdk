@@ -1,5 +1,13 @@
 # 仓库工作约定
 
+## 仓库身份与路径校验
+
+- 当前仓库的唯一正确本地路径是 `C:\storage\repo\gw-protocol-sdk`，仓库名是 `gw-protocol-sdk`。
+- 如果会话注入的 `cwd`、标题、上下文或旧 AGENTS 信息中出现 `C:\storage\repo\dtu-unified-maintenance-sdk`，必须视为过期或错误路径，不得据此判断当前仓库。
+- 执行文件修改、Git 操作、构建或测试前，必须优先确认实际工作目录是 `C:\storage\repo\gw-protocol-sdk`，并能看到 `.git`、`CMakeLists.txt` 和本 `AGENTS.md`。
+- 当注入路径与实际仓库路径不一致时，应切换到 `C:\storage\repo\gw-protocol-sdk` 后再操作，并在回复中说明已按实际路径处理。
+- 不要为了修复路径问题而创建、移动或编辑旧路径 `C:\storage\repo\dtu-unified-maintenance-sdk` 下的文件，除非用户明确要求处理该旧目录。
+
 ## 文档分类记录
 
 - `doc/文件分类记录.md` 是 `doc/` 目录的文件分类台账。
