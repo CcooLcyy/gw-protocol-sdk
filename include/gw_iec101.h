@@ -62,6 +62,60 @@ typedef enum iec_log_level {
     IEC_LOG_DEBUG = 4
 } iec_log_level_t;
 
+typedef struct iec_point_address {
+    uint16_t common_address;
+    uint32_t information_object_address;
+    uint8_t type_id;
+    uint8_t cause_of_transmission;
+    uint8_t originator_address;
+} iec_point_address_t;
+
+typedef enum iec_point_type {
+    IEC_POINT_SINGLE = 1,
+    IEC_POINT_DOUBLE = 2,
+    IEC_POINT_STEP = 3,
+    IEC_POINT_MEASURED_NORMALIZED = 4,
+    IEC_POINT_MEASURED_SCALED = 5,
+    IEC_POINT_MEASURED_SHORT_FLOAT = 6,
+    IEC_POINT_INTEGRATED_TOTAL = 7,
+    IEC_POINT_BITSTRING32 = 8
+} iec_point_type_t;
+
+typedef struct iec_timestamp {
+    uint16_t msec;
+    uint8_t minute;
+    uint8_t hour;
+    uint8_t day;
+    uint8_t month;
+    uint8_t year;
+    uint8_t invalid;
+} iec_timestamp_t;
+
+typedef union iec_point_data {
+    uint8_t single;
+    uint8_t doubled;
+    int8_t step;
+    int16_t normalized;
+    int16_t scaled;
+    float short_float;
+    int32_t integrated_total;
+    uint32_t bitstring32;
+} iec_point_data_t;
+
+typedef struct iec_point_value {
+    iec_point_type_t point_type;
+    uint8_t quality;
+    uint8_t has_timestamp;
+    uint8_t is_sequence;
+    iec_point_data_t data;
+    iec_timestamp_t timestamp;
+} iec_point_value_t;
+
+typedef struct iec_interrogation_request {
+    uint16_t common_address;
+    uint8_t qualifier;
+} iec_interrogation_request_t;
+
 typedef enum iec_raw_asdu_direction {
     IEC_RAW_ASDU_RX = 1,
     IEC_RAW_ASDU_TX = 2
@@ -119,6 +173,12 @@ typedef void(GW_PROTOCOL_CALL *iec_on_session_state_fn)(
     iec_runtime_state_t state,
     void *user_context);
 
+typedef void(GW_PROTOCOL_CALL *iec_on_point_indication_fn)(
+    iec_session_t *session,
+    const iec_point_address_t *address,
+    const iec_point_value_t *value,
+    void *user_context);
+
 typedef void(GW_PROTOCOL_CALL *iec_on_raw_asdu_fn)(
     iec_session_t *session,
     const iec_raw_asdu_event_t *event,
@@ -126,6 +186,7 @@ typedef void(GW_PROTOCOL_CALL *iec_on_raw_asdu_fn)(
 
 typedef struct iec_callbacks {
     iec_on_session_state_fn on_session_state;
+    iec_on_point_indication_fn on_point_indication;
     iec_on_raw_asdu_fn on_raw_asdu;
 } iec_callbacks_t;
 
@@ -181,6 +242,9 @@ GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL iec101_destroy(iec_session_t *sess
 GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL iec101_get_runtime_state(
     const iec_session_t *session,
     iec_runtime_state_t *out_state);
+GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL iec101_general_interrogation(
+    iec_session_t *session,
+    const iec_interrogation_request_t *request);
 GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL iec101_set_option(
     iec_session_t *session,
     iec_option_t option,

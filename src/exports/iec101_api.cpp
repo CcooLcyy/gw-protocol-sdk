@@ -31,6 +31,13 @@ GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL iec101_get_runtime_state(
     return gw::protocol::get_runtime_state(session, out_state);
 }
 
+GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL iec101_general_interrogation(
+    iec_session_t *session,
+    const iec_interrogation_request_t *request)
+{
+    return gw::protocol::general_interrogation(session, request);
+}
+
 GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL iec101_set_option(
     iec_session_t *session,
     iec_option_t option,

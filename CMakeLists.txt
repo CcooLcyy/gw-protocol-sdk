@@ -60,12 +60,15 @@ if(BUILD_TESTING)
         m101.validate_config
         m101.lifecycle
         m101.raw_asdu
+        m101.general_interrogation
         iec101.validate_config
         iec101.lifecycle
         iec101.raw_asdu
+        iec101.general_interrogation
         iec104.validate_config
         iec104.lifecycle
         iec104.raw_asdu
+        iec104.general_interrogation
     )
     foreach(test_case IN LISTS gw_protocol_test_cases)
         add_test(NAME ${test_case} COMMAND gw_protocol_tests ${test_case})

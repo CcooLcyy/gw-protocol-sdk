@@ -9,6 +9,7 @@ GW_m101:m101_destroy
 GW_m101:m101_start
 GW_m101:m101_stop
 GW_m101:m101_get_runtime_state
+GW_m101:m101_general_interrogation
 GW_m101:m101_set_option
 GW_m101:m101_send_raw_asdu
 GW_m101:m101_validate_config
@@ -19,6 +20,7 @@ GW_iec101:iec101_destroy
 GW_iec101:iec101_start
 GW_iec101:iec101_stop
 GW_iec101:iec101_get_runtime_state
+GW_iec101:iec101_general_interrogation
 GW_iec101:iec101_set_option
 GW_iec101:iec101_send_raw_asdu
 GW_iec101:iec101_validate_config
@@ -29,6 +31,7 @@ GW_iec104:iec104_destroy
 GW_iec104:iec104_start
 GW_iec104:iec104_stop
 GW_iec104:iec104_get_runtime_state
+GW_iec104:iec104_general_interrogation
 GW_iec104:iec104_set_option
 GW_iec104:iec104_send_raw_asdu
 GW_iec104:iec104_validate_config

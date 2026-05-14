@@ -1,10 +1,14 @@
 #include "core/session.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <mutex>
 #include <new>
+#include <thread>
 #include <variant>
+#include <vector>
 
 struct iec_session {
     gw::protocol::Profile profile;
@@ -13,6 +17,8 @@ struct iec_session {
     iec_callbacks_t callbacks;
     std::variant<m101_master_config_t, iec101_master_config_t, iec104_master_config_t> protocol_config;
     mutable std::mutex mutex;
+    std::thread worker;
+    bool stop_requested = false;
     iec_runtime_state_t state = IEC_RUNTIME_CREATED;
 };
 
@@ -22,7 +28,27 @@ namespace {
 struct AsduLayout {
     uint8_t cot_length = 0;
     uint8_t common_address_length = 0;
+    uint8_t information_object_address_length = 0;
 };
+
+struct PointDecodeResult {
+    iec_point_value_t value{};
+    uint32_t consumed = 0;
+};
+
+constexpr uint8_t kAsduTypeSinglePoint = 1;
+constexpr uint8_t kAsduTypeDoublePoint = 3;
+constexpr uint8_t kAsduTypeStepPosition = 5;
+constexpr uint8_t kAsduTypeBitstring32 = 7;
+constexpr uint8_t kAsduTypeMeasuredNormalized = 9;
+constexpr uint8_t kAsduTypeMeasuredScaled = 11;
+constexpr uint8_t kAsduTypeMeasuredShortFloat = 13;
+constexpr uint8_t kAsduTypeIntegratedTotal = 15;
+constexpr uint8_t kAsduTypeGeneralInterrogation = 100;
+constexpr uint8_t kCauseActivation = 6;
+constexpr uint8_t kDefaultOriginatorAddress = 0;
+constexpr uint8_t kGeneralInterrogationMinQualifier = 20;
+constexpr uint8_t kGeneralInterrogationMaxQualifier = 36;
 
 bool is_link_mode_valid(iec101_link_mode_t mode) noexcept
 {
@@ -107,15 +133,15 @@ AsduLayout get_asdu_layout(const iec_session_t &session) noexcept
     switch (session.profile) {
     case Profile::M101: {
         const auto &config = std::get<m101_master_config_t>(session.protocol_config);
-        return AsduLayout{config.cot_length, config.common_address_length};
+        return AsduLayout{config.cot_length, config.common_address_length, config.information_object_address_length};
     }
     case Profile::IEC101: {
         const auto &config = std::get<iec101_master_config_t>(session.protocol_config);
-        return AsduLayout{config.cot_length, config.common_address_length};
+        return AsduLayout{config.cot_length, config.common_address_length, config.information_object_address_length};
     }
     case Profile::IEC104: {
         const auto &config = std::get<iec104_master_config_t>(session.protocol_config);
-        return AsduLayout{config.cot_length, config.common_address_length};
+        return AsduLayout{config.cot_length, config.common_address_length, config.information_object_address_length};
     }
     }
     return AsduLayout{};
@@ -128,6 +154,41 @@ uint16_t read_uint16_le(const uint8_t *data, uint8_t length) noexcept
         value |= static_cast<uint16_t>(data[i]) << (i * 8U);
     }
     return value;
+}
+
+uint32_t read_uint32_le(const uint8_t *data, uint8_t length) noexcept
+{
+    uint32_t value = 0;
+    for (uint8_t i = 0; i < length; ++i) {
+        value |= static_cast<uint32_t>(data[i]) << (i * 8U);
+    }
+    return value;
+}
+
+int16_t read_int16_le(const uint8_t *data) noexcept
+{
+    return static_cast<int16_t>(read_uint16_le(data, 2));
+}
+
+int32_t read_int32_le(const uint8_t *data) noexcept
+{
+    return static_cast<int32_t>(read_uint32_le(data, 4));
+}
+
+void write_uint_le(uint8_t *buffer, uint32_t &offset, uint32_t value, uint8_t length) noexcept
+{
+    for (uint8_t i = 0; i < length; ++i) {
+        buffer[offset++] = static_cast<uint8_t>((value >> (i * 8U)) & 0xFFU);
+    }
+}
+
+bool fits_uint_le(uint32_t value, uint8_t length) noexcept
+{
+    if (length >= sizeof(uint32_t)) {
+        return true;
+    }
+    const uint32_t max_value = (1U << (length * 8U)) - 1U;
+    return value <= max_value;
 }
 
 uint64_t monotonic_ns() noexcept
@@ -158,6 +219,275 @@ iec_status_t change_state(iec_session_t *session, iec_runtime_state_t state) noe
     }
     notify_state(session, state);
     return IEC_STATUS_OK;
+}
+
+void notify_raw_asdu(
+    iec_session_t *session,
+    iec_raw_asdu_direction_t direction,
+    const uint8_t *payload,
+    uint32_t payload_size,
+    const AsduLayout &layout,
+    iec_on_raw_asdu_fn callback,
+    void *user_context) noexcept
+{
+    if (callback == nullptr || payload == nullptr || payload_size == 0) {
+        return;
+    }
+
+    iec_raw_asdu_event_t event{};
+    event.direction = direction;
+    event.payload = payload;
+    event.payload_size = payload_size;
+    event.monotonic_ns = monotonic_ns();
+
+    if (payload_size >= 2U + layout.cot_length) {
+        const uint32_t cause_offset = 2U;
+        event.type_id = payload[0];
+        event.cause_of_transmission = payload[cause_offset];
+        const uint32_t common_address_offset = cause_offset + layout.cot_length;
+        if (payload_size >= common_address_offset + layout.common_address_length) {
+            event.common_address = read_uint16_le(payload + common_address_offset, layout.common_address_length);
+        }
+    }
+
+    callback(session, &event, user_context);
+}
+
+bool decode_point_value(uint8_t type_id, const uint8_t *data, uint32_t available, PointDecodeResult &out) noexcept
+{
+    out = PointDecodeResult{};
+
+    switch (type_id) {
+    case kAsduTypeSinglePoint:
+        if (available < 1) {
+            return false;
+        }
+        out.value.point_type = IEC_POINT_SINGLE;
+        out.value.quality = static_cast<uint8_t>(data[0] & 0xF0U);
+        out.value.data.single = static_cast<uint8_t>(data[0] & 0x01U);
+        out.consumed = 1;
+        return true;
+    case kAsduTypeDoublePoint:
+        if (available < 1) {
+            return false;
+        }
+        out.value.point_type = IEC_POINT_DOUBLE;
+        out.value.quality = static_cast<uint8_t>(data[0] & 0xF0U);
+        out.value.data.doubled = static_cast<uint8_t>(data[0] & 0x03U);
+        out.consumed = 1;
+        return true;
+    case kAsduTypeStepPosition:
+        if (available < 2) {
+            return false;
+        }
+        out.value.point_type = IEC_POINT_STEP;
+        out.value.quality = data[1];
+        out.value.data.step = static_cast<int8_t>(data[0] & 0x7FU);
+        if ((data[0] & 0x40U) != 0) {
+            out.value.data.step = static_cast<int8_t>(out.value.data.step | 0x80U);
+        }
+        out.consumed = 2;
+        return true;
+    case kAsduTypeBitstring32:
+        if (available < 5) {
+            return false;
+        }
+        out.value.point_type = IEC_POINT_BITSTRING32;
+        out.value.quality = data[4];
+        out.value.data.bitstring32 = read_uint32_le(data, 4);
+        out.consumed = 5;
+        return true;
+    case kAsduTypeMeasuredNormalized:
+        if (available < 3) {
+            return false;
+        }
+        out.value.point_type = IEC_POINT_MEASURED_NORMALIZED;
+        out.value.quality = data[2];
+        out.value.data.normalized = read_int16_le(data);
+        out.consumed = 3;
+        return true;
+    case kAsduTypeMeasuredScaled:
+        if (available < 3) {
+            return false;
+        }
+        out.value.point_type = IEC_POINT_MEASURED_SCALED;
+        out.value.quality = data[2];
+        out.value.data.scaled = read_int16_le(data);
+        out.consumed = 3;
+        return true;
+    case kAsduTypeMeasuredShortFloat:
+        if (available < 5) {
+            return false;
+        }
+        out.value.point_type = IEC_POINT_MEASURED_SHORT_FLOAT;
+        out.value.quality = data[4];
+        std::memcpy(&out.value.data.short_float, data, sizeof(float));
+        out.consumed = 5;
+        return true;
+    case kAsduTypeIntegratedTotal:
+        if (available < 5) {
+            return false;
+        }
+        out.value.point_type = IEC_POINT_INTEGRATED_TOTAL;
+        out.value.quality = data[4];
+        out.value.data.integrated_total = read_int32_le(data);
+        out.consumed = 5;
+        return true;
+    default:
+        return false;
+    }
+}
+
+void dispatch_point_indications(
+    iec_session_t *session,
+    const uint8_t *payload,
+    uint32_t payload_size,
+    const AsduLayout &layout,
+    iec_on_point_indication_fn callback,
+    void *user_context) noexcept
+{
+    if (callback == nullptr || payload == nullptr || payload_size < 2U + layout.cot_length +
+            layout.common_address_length + layout.information_object_address_length) {
+        return;
+    }
+
+    const uint8_t type_id = payload[0];
+    const uint8_t variable_structure = payload[1];
+    const uint8_t count = static_cast<uint8_t>(variable_structure & 0x7FU);
+    if (count == 0) {
+        return;
+    }
+
+    const bool is_sequence = (variable_structure & 0x80U) != 0;
+    const uint32_t cause_offset = 2U;
+    const uint8_t cause = payload[cause_offset];
+    const uint8_t originator = layout.cot_length == 2 ? payload[cause_offset + 1] : 0;
+    const uint32_t common_address_offset = cause_offset + layout.cot_length;
+    const uint16_t common_address =
+        read_uint16_le(payload + common_address_offset, layout.common_address_length);
+    uint32_t offset = common_address_offset + layout.common_address_length;
+
+    if (is_sequence) {
+        if (payload_size < offset + layout.information_object_address_length) {
+            return;
+        }
+        uint32_t information_object_address =
+            read_uint32_le(payload + offset, layout.information_object_address_length);
+        offset += layout.information_object_address_length;
+
+        for (uint8_t i = 0; i < count; ++i) {
+            PointDecodeResult decoded{};
+            if (!decode_point_value(type_id, payload + offset, payload_size - offset, decoded)) {
+                return;
+            }
+            decoded.value.is_sequence = 1;
+
+            iec_point_address_t address{};
+            address.common_address = common_address;
+            address.information_object_address = information_object_address++;
+            address.type_id = type_id;
+            address.cause_of_transmission = cause;
+            address.originator_address = originator;
+            callback(session, &address, &decoded.value, user_context);
+
+            offset += decoded.consumed;
+        }
+        return;
+    }
+
+    for (uint8_t i = 0; i < count; ++i) {
+        if (payload_size < offset + layout.information_object_address_length) {
+            return;
+        }
+        const uint32_t information_object_address =
+            read_uint32_le(payload + offset, layout.information_object_address_length);
+        offset += layout.information_object_address_length;
+
+        PointDecodeResult decoded{};
+        if (!decode_point_value(type_id, payload + offset, payload_size - offset, decoded)) {
+            return;
+        }
+
+        iec_point_address_t address{};
+        address.common_address = common_address;
+        address.information_object_address = information_object_address;
+        address.type_id = type_id;
+        address.cause_of_transmission = cause;
+        address.originator_address = originator;
+        callback(session, &address, &decoded.value, user_context);
+
+        offset += decoded.consumed;
+    }
+}
+
+void receive_worker(iec_session_t *session) noexcept
+{
+    for (;;) {
+        iec_transport_t transport{};
+        iec_on_raw_asdu_fn raw_callback = nullptr;
+        iec_on_point_indication_fn point_callback = nullptr;
+        void *user_context = nullptr;
+        uint32_t recv_timeout_ms = 50;
+        uint32_t max_frame_len = 0;
+        bool raw_enabled = false;
+        AsduLayout layout{};
+
+        {
+            std::lock_guard<std::mutex> lock(session->mutex);
+            if (session->stop_requested || session->state != IEC_RUNTIME_RUNNING) {
+                return;
+            }
+            transport = session->transport;
+            raw_callback = session->callbacks.on_raw_asdu;
+            point_callback = session->callbacks.on_point_indication;
+            user_context = session->config.user_context;
+            recv_timeout_ms = std::min<uint32_t>(session->config.command_timeout_ms, 50U);
+            if (recv_timeout_ms == 0) {
+                recv_timeout_ms = 1;
+            }
+            max_frame_len = session->transport.max_plain_frame_len;
+            raw_enabled = session->config.enable_raw_asdu != 0;
+            layout = get_asdu_layout(*session);
+        }
+
+        std::vector<uint8_t> buffer;
+        try {
+            buffer.resize(max_frame_len);
+        } catch (...) {
+            return;
+        }
+        uint32_t received = 0;
+        const int recv_result =
+            transport.recv(transport.ctx, buffer.data(), max_frame_len, &received, recv_timeout_ms);
+        if (recv_result != 0 || received == 0 || received > max_frame_len) {
+            continue;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(session->mutex);
+            if (session->stop_requested || session->state != IEC_RUNTIME_RUNNING) {
+                return;
+            }
+        }
+
+        if (raw_enabled) {
+            notify_raw_asdu(
+                session,
+                IEC_RAW_ASDU_RX,
+                buffer.data(),
+                received,
+                layout,
+                raw_callback,
+                user_context);
+        }
+        dispatch_point_indications(
+            session,
+            buffer.data(),
+            received,
+            layout,
+            point_callback,
+            user_context);
+    }
 }
 
 } // namespace
@@ -298,6 +628,10 @@ iec_status_t destroy_session(iec_session_t *session) noexcept
             session->state != IEC_RUNTIME_FAULTED) {
             return IEC_STATUS_BAD_STATE;
         }
+        session->stop_requested = true;
+    }
+    if (session->worker.joinable()) {
+        session->worker.join();
     }
     delete session;
     return IEC_STATUS_OK;
@@ -310,6 +644,78 @@ iec_status_t get_runtime_state(const iec_session_t *session, iec_runtime_state_t
     }
     std::lock_guard<std::mutex> lock(session->mutex);
     *out_state = session->state;
+    return IEC_STATUS_OK;
+}
+
+iec_status_t general_interrogation(iec_session_t *session, const iec_interrogation_request_t *request) noexcept
+{
+    if (session == nullptr || request == nullptr) {
+        return IEC_STATUS_INVALID_ARGUMENT;
+    }
+    if (request->qualifier < kGeneralInterrogationMinQualifier ||
+        request->qualifier > kGeneralInterrogationMaxQualifier) {
+        return IEC_STATUS_INVALID_ARGUMENT;
+    }
+
+    uint8_t frame[16]{};
+    uint32_t frame_size = 0;
+    iec_transport_t transport{};
+    iec_on_raw_asdu_fn raw_callback = nullptr;
+    void *user_context = nullptr;
+    uint32_t timeout_ms = 0;
+    bool raw_enabled = false;
+    AsduLayout layout{};
+
+    {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        if (session->state != IEC_RUNTIME_RUNNING) {
+            return IEC_STATUS_BAD_STATE;
+        }
+
+        layout = get_asdu_layout(*session);
+        if (layout.cot_length == 0 || layout.common_address_length == 0 ||
+            layout.information_object_address_length == 0 ||
+            !fits_uint_le(request->common_address, layout.common_address_length)) {
+            return IEC_STATUS_INVALID_ARGUMENT;
+        }
+
+        frame[frame_size++] = kAsduTypeGeneralInterrogation;
+        frame[frame_size++] = 1;
+        write_uint_le(frame, frame_size, kCauseActivation, 1);
+        if (layout.cot_length == 2) {
+            write_uint_le(frame, frame_size, kDefaultOriginatorAddress, 1);
+        }
+        write_uint_le(frame, frame_size, request->common_address, layout.common_address_length);
+        write_uint_le(frame, frame_size, 0, layout.information_object_address_length);
+        frame[frame_size++] = request->qualifier;
+
+        if (frame_size > session->transport.max_plain_frame_len) {
+            return IEC_STATUS_INVALID_ARGUMENT;
+        }
+
+        transport = session->transport;
+        raw_callback = session->callbacks.on_raw_asdu;
+        user_context = session->config.user_context;
+        timeout_ms = session->config.command_timeout_ms;
+        raw_enabled = session->config.enable_raw_asdu != 0;
+    }
+
+    const int send_result = transport.send(transport.ctx, frame, frame_size, timeout_ms);
+    if (send_result != 0) {
+        return IEC_STATUS_IO_ERROR;
+    }
+
+    if (raw_enabled) {
+        notify_raw_asdu(
+            session,
+            IEC_RAW_ASDU_TX,
+            frame,
+            frame_size,
+            layout,
+            raw_callback,
+            user_context);
+    }
+
     return IEC_STATUS_OK;
 }
 
@@ -389,18 +795,14 @@ iec_status_t send_raw_asdu(iec_session_t *session, const iec_raw_asdu_tx_t *requ
     }
 
     if (callback != nullptr) {
-        const uint32_t cause_offset = 2U;
-        const uint32_t common_address_offset = cause_offset + layout.cot_length;
-        iec_raw_asdu_event_t event{};
-        event.direction = IEC_RAW_ASDU_TX;
-        event.common_address =
-            read_uint16_le(request->payload + common_address_offset, layout.common_address_length);
-        event.type_id = request->payload[0];
-        event.cause_of_transmission = request->payload[cause_offset];
-        event.payload = request->payload;
-        event.payload_size = request->payload_size;
-        event.monotonic_ns = monotonic_ns();
-        callback(session, &event, user_context);
+        notify_raw_asdu(
+            session,
+            IEC_RAW_ASDU_TX,
+            request->payload,
+            request->payload_size,
+            layout,
+            callback,
+            user_context);
     }
 
     return IEC_STATUS_OK;
@@ -418,7 +820,24 @@ iec_status_t start_session(iec_session_t *session) noexcept
         }
     }
     change_state(session, IEC_RUNTIME_STARTING);
-    change_state(session, IEC_RUNTIME_RUNNING);
+
+    {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        session->stop_requested = false;
+        session->state = IEC_RUNTIME_RUNNING;
+    }
+
+    try {
+        session->worker = std::thread(receive_worker, session);
+    } catch (const std::bad_alloc &) {
+        change_state(session, IEC_RUNTIME_FAULTED);
+        return IEC_STATUS_NO_MEMORY;
+    } catch (...) {
+        change_state(session, IEC_RUNTIME_FAULTED);
+        return IEC_STATUS_INTERNAL_ERROR;
+    }
+
+    notify_state(session, IEC_RUNTIME_RUNNING);
     return IEC_STATUS_OK;
 }
 
@@ -432,8 +851,12 @@ iec_status_t stop_session(iec_session_t *session, uint32_t /*timeout_ms*/) noexc
         if (session->state != IEC_RUNTIME_RUNNING) {
             return IEC_STATUS_BAD_STATE;
         }
+        session->stop_requested = true;
     }
     change_state(session, IEC_RUNTIME_STOPPING);
+    if (session->worker.joinable()) {
+        session->worker.join();
+    }
     change_state(session, IEC_RUNTIME_STOPPED);
     return IEC_STATUS_OK;
 }

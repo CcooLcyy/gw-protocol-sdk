@@ -12,6 +12,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -123,6 +124,7 @@ struct MockTransport {
     uint32_t send_count = 0;
     uint32_t recv_count = 0;
     std::vector<uint8_t> last_sent;
+    std::vector<std::vector<uint8_t>> recv_queue;
 };
 
 int mock_send(void *ctx, const uint8_t *data, uint32_t len, uint32_t timeout_ms)
@@ -145,9 +147,6 @@ int mock_send(void *ctx, const uint8_t *data, uint32_t len, uint32_t timeout_ms)
 
 int mock_recv(void *ctx, uint8_t *buffer, uint32_t capacity, uint32_t *out_len, uint32_t timeout_ms)
 {
-    (void)buffer;
-    (void)capacity;
-
     auto *transport = static_cast<MockTransport *>(ctx);
     if (transport == nullptr || out_len == nullptr) {
         return -1;
@@ -155,14 +154,37 @@ int mock_recv(void *ctx, uint8_t *buffer, uint32_t capacity, uint32_t *out_len, 
 
     const uint32_t sleep_ms = std::min<uint32_t>(timeout_ms == 0 ? 1U : timeout_ms, 5U);
     std::unique_lock<std::mutex> lock(transport->mutex);
-    transport->cv.wait_for(lock, std::chrono::milliseconds(sleep_ms), [&] { return transport->closed; });
-    if (transport->closed) {
+    transport->cv.wait_for(lock, std::chrono::milliseconds(sleep_ms), [&] {
+        return transport->closed || !transport->recv_queue.empty();
+    });
+    if (transport->closed && transport->recv_queue.empty()) {
         return -1;
     }
 
-    *out_len = 0;
     ++transport->recv_count;
+    if (transport->recv_queue.empty()) {
+        *out_len = 0;
+        return 0;
+    }
+
+    auto frame = std::move(transport->recv_queue.front());
+    transport->recv_queue.erase(transport->recv_queue.begin());
+    if (buffer == nullptr || frame.size() > capacity) {
+        return -1;
+    }
+
+    std::copy(frame.begin(), frame.end(), buffer);
+    *out_len = static_cast<uint32_t>(frame.size());
     return 0;
+}
+
+void push_recv(MockTransport &transport, std::vector<uint8_t> frame)
+{
+    {
+        std::lock_guard<std::mutex> lock(transport.mutex);
+        transport.recv_queue.push_back(std::move(frame));
+    }
+    transport.cv.notify_all();
 }
 
 void close_transport(MockTransport &transport)
@@ -190,6 +212,13 @@ struct StateRecorder {
     };
 
     std::vector<RawAsduEvent> raw_events;
+
+    struct PointEvent {
+        iec_point_address_t address{};
+        iec_point_value_t value{};
+    };
+
+    std::vector<PointEvent> point_events;
 
     void record(iec_runtime_state_t state)
     {
@@ -220,6 +249,15 @@ struct StateRecorder {
         cv.notify_all();
     }
 
+    void record_point(const iec_point_address_t &address, const iec_point_value_t &value)
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            point_events.push_back(PointEvent{address, value});
+        }
+        cv.notify_all();
+    }
+
     std::vector<iec_runtime_state_t> snapshot() const
     {
         std::lock_guard<std::mutex> lock(mutex);
@@ -232,11 +270,25 @@ struct StateRecorder {
         return raw_events;
     }
 
+    std::vector<PointEvent> point_snapshot() const
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        return point_events;
+    }
+
     bool wait_until_contains(iec_runtime_state_t state)
     {
         std::unique_lock<std::mutex> lock(mutex);
         return cv.wait_for(lock, kStateWaitTimeout, [&] {
             return std::find(states.begin(), states.end(), state) != states.end();
+        });
+    }
+
+    bool wait_until_point_count(std::size_t count)
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        return cv.wait_for(lock, kStateWaitTimeout, [&] {
+            return point_events.size() >= count;
         });
     }
 };
@@ -259,6 +311,20 @@ void on_raw_asdu(iec_session_t *session, const iec_raw_asdu_event_t *event, void
         return;
     }
     recorder->record_raw(*event);
+}
+
+void on_point_indication(
+    iec_session_t *session,
+    const iec_point_address_t *address,
+    const iec_point_value_t *value,
+    void *user_context)
+{
+    (void)session;
+    auto *recorder = static_cast<StateRecorder *>(user_context);
+    if (recorder == nullptr || address == nullptr || value == nullptr) {
+        return;
+    }
+    recorder->record_point(*address, *value);
 }
 
 iec_session_config_t make_common_config(StateRecorder &recorder)
@@ -289,6 +355,7 @@ iec_callbacks_t make_callbacks()
 {
     iec_callbacks_t callbacks{};
     callbacks.on_session_state = on_session_state;
+    callbacks.on_point_indication = on_point_indication;
     callbacks.on_raw_asdu = on_raw_asdu;
     return callbacks;
 }
@@ -571,6 +638,107 @@ void exercise_raw_asdu(
     std::printf("  %s raw_asdu\n", name);
 }
 
+template <
+    typename Config,
+    typename CreateFn,
+    typename DestroyFn,
+    typename StartFn,
+    typename StopFn,
+    typename GeneralInterrogationFn>
+void exercise_general_interrogation(
+    const char *name,
+    const Config &protocol_config,
+    CreateFn create,
+    DestroyFn destroy,
+    StartFn start,
+    StopFn stop,
+    GeneralInterrogationFn general_interrogation)
+{
+    StateRecorder recorder;
+    MockTransport mock;
+    auto common = make_common_config(recorder);
+    auto transport = make_transport(mock);
+    auto callbacks = make_callbacks();
+
+    iec_session_t *session = nullptr;
+    const iec_interrogation_request_t request{1, 20};
+    const iec_interrogation_request_t invalid_request{1, 0};
+    const std::vector<uint8_t> expected_request{
+        100,
+        1,
+        6,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        20,
+    };
+    const std::vector<uint8_t> point_response{
+        1,
+        1,
+        20,
+        0,
+        1,
+        0,
+        0x01,
+        0x40,
+        0x00,
+        0x01,
+    };
+
+    EXPECT_STATUS(general_interrogation(nullptr, &request), IEC_STATUS_INVALID_ARGUMENT);
+    EXPECT_STATUS(create(&common, &protocol_config, &transport, &callbacks, &session), IEC_STATUS_OK);
+    EXPECT_TRUE(session != nullptr);
+
+    auto cleanup = [&] {
+        if (session != nullptr) {
+            (void)stop(session, 100);
+            (void)destroy(session);
+            session = nullptr;
+        }
+        close_transport(mock);
+    };
+
+    try {
+        EXPECT_STATUS(general_interrogation(session, nullptr), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(general_interrogation(session, &invalid_request), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(general_interrogation(session, &request), IEC_STATUS_BAD_STATE);
+
+        EXPECT_STATUS(start(session), IEC_STATUS_OK);
+        EXPECT_TRUE(recorder.wait_until_contains(IEC_RUNTIME_RUNNING));
+        EXPECT_STATUS(general_interrogation(session, &request), IEC_STATUS_OK);
+        EXPECT_TRUE(mock.send_count == 1);
+        EXPECT_TRUE(mock.last_sent == expected_request);
+
+        push_recv(mock, point_response);
+        EXPECT_TRUE(recorder.wait_until_point_count(1));
+        const auto points = recorder.point_snapshot();
+        EXPECT_TRUE(points.size() == 1);
+        EXPECT_TRUE(points[0].address.common_address == 1);
+        EXPECT_TRUE(points[0].address.information_object_address == 0x4001);
+        EXPECT_TRUE(points[0].address.type_id == 1);
+        EXPECT_TRUE(points[0].address.cause_of_transmission == 20);
+        EXPECT_TRUE(points[0].address.originator_address == 0);
+        EXPECT_TRUE(points[0].value.point_type == IEC_POINT_SINGLE);
+        EXPECT_TRUE(points[0].value.data.single == 1);
+        EXPECT_TRUE(points[0].value.quality == 0);
+        EXPECT_TRUE(points[0].value.has_timestamp == 0);
+        EXPECT_TRUE(points[0].value.is_sequence == 0);
+
+        EXPECT_STATUS(stop(session, 1000), IEC_STATUS_OK);
+        EXPECT_STATUS(destroy(session), IEC_STATUS_OK);
+        session = nullptr;
+        close_transport(mock);
+    } catch (...) {
+        cleanup();
+        throw;
+    }
+
+    std::printf("  %s general_interrogation\n", name);
+}
+
 void test_iec101_validate_config()
 {
     auto valid = make_iec101_config();
@@ -629,6 +797,27 @@ void test_iec101_raw_asdu()
         },
         [](iec_session_t *session, const iec_raw_asdu_tx_t *request) {
             return iec101_send_raw_asdu(session, request);
+        });
+}
+
+void test_iec101_general_interrogation()
+{
+    const auto valid = make_iec101_config();
+    exercise_general_interrogation(
+        "iec101",
+        valid,
+        [](const iec_session_config_t *common,
+           const iec101_master_config_t *config,
+           const iec_transport_t *transport,
+           const iec_callbacks_t *callbacks,
+           iec_session_t **out_session) {
+            return iec101_create(common, config, transport, callbacks, out_session);
+        },
+        [](iec_session_t *session) { return iec101_destroy(session); },
+        [](iec_session_t *session) { return iec101_start(session); },
+        [](iec_session_t *session, uint32_t timeout_ms) { return iec101_stop(session, timeout_ms); },
+        [](iec_session_t *session, const iec_interrogation_request_t *request) {
+            return iec101_general_interrogation(session, request);
         });
 }
 
@@ -693,6 +882,27 @@ void test_m101_raw_asdu()
         });
 }
 
+void test_m101_general_interrogation()
+{
+    const auto valid = make_m101_config();
+    exercise_general_interrogation(
+        "m101",
+        valid,
+        [](const iec_session_config_t *common,
+           const m101_master_config_t *config,
+           const iec_transport_t *transport,
+           const iec_callbacks_t *callbacks,
+           iec_session_t **out_session) {
+            return m101_create(common, config, transport, callbacks, out_session);
+        },
+        [](iec_session_t *session) { return m101_destroy(session); },
+        [](iec_session_t *session) { return m101_start(session); },
+        [](iec_session_t *session, uint32_t timeout_ms) { return m101_stop(session, timeout_ms); },
+        [](iec_session_t *session, const iec_interrogation_request_t *request) {
+            return m101_general_interrogation(session, request);
+        });
+}
+
 void test_iec104_validate_config()
 {
     auto valid = make_iec104_config();
@@ -754,6 +964,27 @@ void test_iec104_raw_asdu()
         });
 }
 
+void test_iec104_general_interrogation()
+{
+    const auto valid = make_iec104_config();
+    exercise_general_interrogation(
+        "iec104",
+        valid,
+        [](const iec_session_config_t *common,
+           const iec104_master_config_t *config,
+           const iec_transport_t *transport,
+           const iec_callbacks_t *callbacks,
+           iec_session_t **out_session) {
+            return iec104_create(common, config, transport, callbacks, out_session);
+        },
+        [](iec_session_t *session) { return iec104_destroy(session); },
+        [](iec_session_t *session) { return iec104_start(session); },
+        [](iec_session_t *session, uint32_t timeout_ms) { return iec104_stop(session, timeout_ms); },
+        [](iec_session_t *session, const iec_interrogation_request_t *request) {
+            return iec104_general_interrogation(session, request);
+        });
+}
+
 struct TestCase {
     const char *name;
     void (*run)();
@@ -776,12 +1007,15 @@ int gw_protocol_run_lifecycle_tests(const char *filter)
         {"m101.validate_config", test_m101_validate_config},
         {"m101.lifecycle", test_m101_lifecycle},
         {"m101.raw_asdu", test_m101_raw_asdu},
+        {"m101.general_interrogation", test_m101_general_interrogation},
         {"iec101.validate_config", test_iec101_validate_config},
         {"iec101.lifecycle", test_iec101_lifecycle},
         {"iec101.raw_asdu", test_iec101_raw_asdu},
+        {"iec101.general_interrogation", test_iec101_general_interrogation},
         {"iec104.validate_config", test_iec104_validate_config},
         {"iec104.lifecycle", test_iec104_lifecycle},
         {"iec104.raw_asdu", test_iec104_raw_asdu},
+        {"iec104.general_interrogation", test_iec104_general_interrogation},
     };
 
     int failures = 0;
