@@ -40,6 +40,13 @@ GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL iec104_set_option(
     return gw::protocol::set_option(session, option, value, value_size);
 }
 
+GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL iec104_send_raw_asdu(
+    iec_session_t *session,
+    const iec_raw_asdu_tx_t *request)
+{
+    return gw::protocol::send_raw_asdu(session, request);
+}
+
 GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL iec104_start(iec_session_t *session)
 {
     return gw::protocol::start_session(session);

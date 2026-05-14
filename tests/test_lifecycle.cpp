@@ -122,12 +122,11 @@ struct MockTransport {
     bool closed = false;
     uint32_t send_count = 0;
     uint32_t recv_count = 0;
+    std::vector<uint8_t> last_sent;
 };
 
 int mock_send(void *ctx, const uint8_t *data, uint32_t len, uint32_t timeout_ms)
 {
-    (void)data;
-    (void)len;
     (void)timeout_ms;
 
     auto *transport = static_cast<MockTransport *>(ctx);
@@ -140,6 +139,7 @@ int mock_send(void *ctx, const uint8_t *data, uint32_t len, uint32_t timeout_ms)
         return -1;
     }
     ++transport->send_count;
+    transport->last_sent.assign(data, data + len);
     return 0;
 }
 
@@ -179,6 +179,18 @@ struct StateRecorder {
     std::condition_variable cv;
     std::vector<iec_runtime_state_t> states;
 
+    struct RawAsduEvent {
+        iec_raw_asdu_direction_t direction = IEC_RAW_ASDU_RX;
+        uint16_t common_address = 0;
+        uint8_t type_id = 0;
+        uint8_t cause_of_transmission = 0;
+        uint32_t payload_size = 0;
+        uint64_t monotonic_ns = 0;
+        std::vector<uint8_t> payload;
+    };
+
+    std::vector<RawAsduEvent> raw_events;
+
     void record(iec_runtime_state_t state)
     {
         {
@@ -188,10 +200,36 @@ struct StateRecorder {
         cv.notify_all();
     }
 
+    void record_raw(const iec_raw_asdu_event_t &event)
+    {
+        RawAsduEvent snapshot{};
+        snapshot.direction = event.direction;
+        snapshot.common_address = event.common_address;
+        snapshot.type_id = event.type_id;
+        snapshot.cause_of_transmission = event.cause_of_transmission;
+        snapshot.payload_size = event.payload_size;
+        snapshot.monotonic_ns = event.monotonic_ns;
+        if (event.payload != nullptr && event.payload_size > 0) {
+            snapshot.payload.assign(event.payload, event.payload + event.payload_size);
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            raw_events.push_back(snapshot);
+        }
+        cv.notify_all();
+    }
+
     std::vector<iec_runtime_state_t> snapshot() const
     {
         std::lock_guard<std::mutex> lock(mutex);
         return states;
+    }
+
+    std::vector<RawAsduEvent> raw_snapshot() const
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        return raw_events;
     }
 
     bool wait_until_contains(iec_runtime_state_t state)
@@ -211,6 +249,16 @@ void on_session_state(iec_session_t *session, iec_runtime_state_t state, void *u
         return;
     }
     recorder->record(state);
+}
+
+void on_raw_asdu(iec_session_t *session, const iec_raw_asdu_event_t *event, void *user_context)
+{
+    (void)session;
+    auto *recorder = static_cast<StateRecorder *>(user_context);
+    if (recorder == nullptr || event == nullptr) {
+        return;
+    }
+    recorder->record_raw(*event);
 }
 
 iec_session_config_t make_common_config(StateRecorder &recorder)
@@ -241,6 +289,7 @@ iec_callbacks_t make_callbacks()
 {
     iec_callbacks_t callbacks{};
     callbacks.on_session_state = on_session_state;
+    callbacks.on_raw_asdu = on_raw_asdu;
     return callbacks;
 }
 
@@ -388,8 +437,9 @@ void exercise_lifecycle(
         EXPECT_STATUS(
             set_option(session, static_cast<iec_option_t>(0), &raw_asdu_enabled, sizeof(raw_asdu_enabled)),
             IEC_STATUS_INVALID_ARGUMENT);
+        uint8_t log_level = IEC_LOG_INFO;
         EXPECT_STATUS(
-            set_option(session, IEC_OPTION_ENABLE_RAW_ASDU, &raw_asdu_enabled, sizeof(raw_asdu_enabled)),
+            set_option(session, IEC_OPTION_LOG_LEVEL, &log_level, sizeof(log_level)),
             IEC_STATUS_OK);
 
         EXPECT_STATUS(start(session), IEC_STATUS_OK);
@@ -430,7 +480,98 @@ void exercise_lifecycle(
     std::printf("  %s lifecycle\n", name);
 }
 
-void test_iec101()
+template <
+    typename Config,
+    typename CreateFn,
+    typename DestroyFn,
+    typename StartFn,
+    typename StopFn,
+    typename SetOptionFn,
+    typename SendRawFn>
+void exercise_raw_asdu(
+    const char *name,
+    const Config &protocol_config,
+    CreateFn create,
+    DestroyFn destroy,
+    StartFn start,
+    StopFn stop,
+    SetOptionFn set_option,
+    SendRawFn send_raw)
+{
+    StateRecorder recorder;
+    MockTransport mock;
+    auto common = make_common_config(recorder);
+    auto transport = make_transport(mock);
+    auto callbacks = make_callbacks();
+
+    iec_session_t *session = nullptr;
+    const uint8_t raw_payload[] = {100, 1, 6, 0, 1, 0};
+    const auto raw_payload_size = static_cast<uint32_t>(sizeof(raw_payload));
+    const std::vector<uint8_t> expected_raw(raw_payload, raw_payload + raw_payload_size);
+    const iec_raw_asdu_tx_t raw_request{raw_payload, raw_payload_size, 0};
+    const uint8_t short_raw_payload[] = {100, 1, 6};
+    const iec_raw_asdu_tx_t short_raw_request{
+        short_raw_payload,
+        static_cast<uint32_t>(sizeof(short_raw_payload)),
+        0};
+    const iec_raw_asdu_tx_t null_payload_request{nullptr, raw_payload_size, 0};
+    const iec_raw_asdu_tx_t invalid_flag_request{raw_payload, raw_payload_size, 2};
+
+    EXPECT_STATUS(send_raw(nullptr, &raw_request), IEC_STATUS_INVALID_ARGUMENT);
+    EXPECT_STATUS(create(&common, &protocol_config, &transport, &callbacks, &session), IEC_STATUS_OK);
+    EXPECT_TRUE(session != nullptr);
+
+    auto cleanup = [&] {
+        if (session != nullptr) {
+            (void)stop(session, 100);
+            (void)destroy(session);
+            session = nullptr;
+        }
+        close_transport(mock);
+    };
+
+    try {
+        EXPECT_STATUS(send_raw(session, nullptr), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(send_raw(session, &raw_request), IEC_STATUS_BAD_STATE);
+
+        EXPECT_STATUS(start(session), IEC_STATUS_OK);
+        EXPECT_TRUE(recorder.wait_until_contains(IEC_RUNTIME_RUNNING));
+        EXPECT_STATUS(send_raw(session, &raw_request), IEC_STATUS_BAD_STATE);
+
+        uint8_t raw_asdu_enabled = 1;
+        EXPECT_STATUS(
+            set_option(session, IEC_OPTION_ENABLE_RAW_ASDU, &raw_asdu_enabled, sizeof(raw_asdu_enabled)),
+            IEC_STATUS_OK);
+        EXPECT_STATUS(send_raw(session, &null_payload_request), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(send_raw(session, &short_raw_request), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(send_raw(session, &invalid_flag_request), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(send_raw(session, &raw_request), IEC_STATUS_OK);
+
+        EXPECT_TRUE(mock.send_count == 1);
+        EXPECT_TRUE(mock.last_sent == expected_raw);
+        const auto raw_events = recorder.raw_snapshot();
+        EXPECT_TRUE(raw_events.size() == 1);
+        EXPECT_TRUE(raw_events[0].direction == IEC_RAW_ASDU_TX);
+        EXPECT_TRUE(raw_events[0].common_address == 1);
+        EXPECT_TRUE(raw_events[0].type_id == 100);
+        EXPECT_TRUE(raw_events[0].cause_of_transmission == 6);
+        EXPECT_TRUE(raw_events[0].payload_size == raw_payload_size);
+        EXPECT_TRUE(raw_events[0].payload == expected_raw);
+        EXPECT_TRUE(raw_events[0].monotonic_ns > 0);
+
+        EXPECT_STATUS(stop(session, 1000), IEC_STATUS_OK);
+        EXPECT_STATUS(destroy(session), IEC_STATUS_OK);
+        session = nullptr;
+        close_transport(mock);
+    } catch (...) {
+        cleanup();
+        throw;
+    }
+
+    std::printf("  %s raw_asdu\n", name);
+}
+
+void test_iec101_validate_config()
 {
     auto valid = make_iec101_config();
     auto invalid = valid;
@@ -441,7 +582,11 @@ void test_iec101()
         valid,
         [](const iec101_master_config_t *config) { return iec101_validate_config(config); },
         invalid);
+}
 
+void test_iec101_lifecycle()
+{
+    const auto valid = make_iec101_config();
     exercise_lifecycle(
         "iec101",
         valid,
@@ -463,7 +608,31 @@ void test_iec101()
         });
 }
 
-void test_m101()
+void test_iec101_raw_asdu()
+{
+    const auto valid = make_iec101_config();
+    exercise_raw_asdu(
+        "iec101",
+        valid,
+        [](const iec_session_config_t *common,
+           const iec101_master_config_t *config,
+           const iec_transport_t *transport,
+           const iec_callbacks_t *callbacks,
+           iec_session_t **out_session) {
+            return iec101_create(common, config, transport, callbacks, out_session);
+        },
+        [](iec_session_t *session) { return iec101_destroy(session); },
+        [](iec_session_t *session) { return iec101_start(session); },
+        [](iec_session_t *session, uint32_t timeout_ms) { return iec101_stop(session, timeout_ms); },
+        [](iec_session_t *session, iec_option_t option, const void *value, uint32_t value_size) {
+            return iec101_set_option(session, option, value, value_size);
+        },
+        [](iec_session_t *session, const iec_raw_asdu_tx_t *request) {
+            return iec101_send_raw_asdu(session, request);
+        });
+}
+
+void test_m101_validate_config()
 {
     auto valid = make_m101_config();
     auto invalid = valid;
@@ -474,7 +643,11 @@ void test_m101()
         valid,
         [](const m101_master_config_t *config) { return m101_validate_config(config); },
         invalid);
+}
 
+void test_m101_lifecycle()
+{
+    const auto valid = make_m101_config();
     exercise_lifecycle(
         "m101",
         valid,
@@ -496,7 +669,31 @@ void test_m101()
         });
 }
 
-void test_iec104()
+void test_m101_raw_asdu()
+{
+    const auto valid = make_m101_config();
+    exercise_raw_asdu(
+        "m101",
+        valid,
+        [](const iec_session_config_t *common,
+           const m101_master_config_t *config,
+           const iec_transport_t *transport,
+           const iec_callbacks_t *callbacks,
+           iec_session_t **out_session) {
+            return m101_create(common, config, transport, callbacks, out_session);
+        },
+        [](iec_session_t *session) { return m101_destroy(session); },
+        [](iec_session_t *session) { return m101_start(session); },
+        [](iec_session_t *session, uint32_t timeout_ms) { return m101_stop(session, timeout_ms); },
+        [](iec_session_t *session, iec_option_t option, const void *value, uint32_t value_size) {
+            return m101_set_option(session, option, value, value_size);
+        },
+        [](iec_session_t *session, const iec_raw_asdu_tx_t *request) {
+            return m101_send_raw_asdu(session, request);
+        });
+}
+
+void test_iec104_validate_config()
 {
     auto valid = make_iec104_config();
     auto invalid = valid;
@@ -507,7 +704,11 @@ void test_iec104()
         valid,
         [](const iec104_master_config_t *config) { return iec104_validate_config(config); },
         invalid);
+}
 
+void test_iec104_lifecycle()
+{
+    const auto valid = make_iec104_config();
     exercise_lifecycle(
         "iec104",
         valid,
@@ -529,23 +730,67 @@ void test_iec104()
         });
 }
 
+void test_iec104_raw_asdu()
+{
+    const auto valid = make_iec104_config();
+    exercise_raw_asdu(
+        "iec104",
+        valid,
+        [](const iec_session_config_t *common,
+           const iec104_master_config_t *config,
+           const iec_transport_t *transport,
+           const iec_callbacks_t *callbacks,
+           iec_session_t **out_session) {
+            return iec104_create(common, config, transport, callbacks, out_session);
+        },
+        [](iec_session_t *session) { return iec104_destroy(session); },
+        [](iec_session_t *session) { return iec104_start(session); },
+        [](iec_session_t *session, uint32_t timeout_ms) { return iec104_stop(session, timeout_ms); },
+        [](iec_session_t *session, iec_option_t option, const void *value, uint32_t value_size) {
+            return iec104_set_option(session, option, value, value_size);
+        },
+        [](iec_session_t *session, const iec_raw_asdu_tx_t *request) {
+            return iec104_send_raw_asdu(session, request);
+        });
+}
+
 struct TestCase {
     const char *name;
     void (*run)();
 };
 
+bool matches_filter(const char *filter, const char *name)
+{
+    if (filter == nullptr || filter[0] == '\0') {
+        return true;
+    }
+    const std::string requested{filter};
+    return requested == "all" || requested == name;
+}
+
 } // namespace
 
-int gw_protocol_run_lifecycle_tests()
+int gw_protocol_run_lifecycle_tests(const char *filter)
 {
     const TestCase tests[] = {
-        {"m101", test_m101},
-        {"iec101", test_iec101},
-        {"iec104", test_iec104},
+        {"m101.validate_config", test_m101_validate_config},
+        {"m101.lifecycle", test_m101_lifecycle},
+        {"m101.raw_asdu", test_m101_raw_asdu},
+        {"iec101.validate_config", test_iec101_validate_config},
+        {"iec101.lifecycle", test_iec101_lifecycle},
+        {"iec101.raw_asdu", test_iec101_raw_asdu},
+        {"iec104.validate_config", test_iec104_validate_config},
+        {"iec104.lifecycle", test_iec104_lifecycle},
+        {"iec104.raw_asdu", test_iec104_raw_asdu},
     };
 
     int failures = 0;
+    int selected = 0;
     for (const auto &test : tests) {
+        if (!matches_filter(filter, test.name)) {
+            continue;
+        }
+        ++selected;
         try {
             test.run();
         } catch (const std::exception &ex) {
@@ -555,6 +800,15 @@ int gw_protocol_run_lifecycle_tests()
             ++failures;
             std::fprintf(stderr, "FAIL %s: unknown exception\n", test.name);
         }
+    }
+
+    if (selected == 0) {
+        std::fprintf(stderr, "unknown test case: %s\n", filter == nullptr ? "" : filter);
+        std::fprintf(stderr, "available test cases:\n");
+        for (const auto &test : tests) {
+            std::fprintf(stderr, "  %s\n", test.name);
+        }
+        return 1;
     }
 
     return failures;

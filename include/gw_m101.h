@@ -62,6 +62,27 @@ typedef enum iec_log_level {
     IEC_LOG_DEBUG = 4
 } iec_log_level_t;
 
+typedef enum iec_raw_asdu_direction {
+    IEC_RAW_ASDU_RX = 1,
+    IEC_RAW_ASDU_TX = 2
+} iec_raw_asdu_direction_t;
+
+typedef struct iec_raw_asdu_event {
+    iec_raw_asdu_direction_t direction;
+    uint16_t common_address;
+    uint8_t type_id;
+    uint8_t cause_of_transmission;
+    const uint8_t *payload;
+    uint32_t payload_size;
+    uint64_t monotonic_ns;
+} iec_raw_asdu_event_t;
+
+typedef struct iec_raw_asdu_tx {
+    const uint8_t *payload;
+    uint32_t payload_size;
+    uint8_t bypass_high_level_validation;
+} iec_raw_asdu_tx_t;
+
 typedef int(GW_PROTOCOL_CALL *iec_transport_send_fn)(
     void *ctx,
     const uint8_t *data,
@@ -98,8 +119,14 @@ typedef void(GW_PROTOCOL_CALL *iec_on_session_state_fn)(
     iec_runtime_state_t state,
     void *user_context);
 
+typedef void(GW_PROTOCOL_CALL *iec_on_raw_asdu_fn)(
+    iec_session_t *session,
+    const iec_raw_asdu_event_t *event,
+    void *user_context);
+
 typedef struct iec_callbacks {
     iec_on_session_state_fn on_session_state;
+    iec_on_raw_asdu_fn on_raw_asdu;
 } iec_callbacks_t;
 
 #ifdef __cplusplus
@@ -160,6 +187,9 @@ GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL m101_set_option(
     iec_option_t option,
     const void *value,
     uint32_t value_size);
+GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL m101_send_raw_asdu(
+    iec_session_t *session,
+    const iec_raw_asdu_tx_t *request);
 GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL m101_start(iec_session_t *session);
 GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL m101_stop(iec_session_t *session, uint32_t timeout_ms);
 GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL m101_validate_config(const m101_master_config_t *config);

@@ -1,5 +1,6 @@
 #include "core/session.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <mutex>
 #include <new>
@@ -17,6 +18,11 @@ struct iec_session {
 
 namespace gw::protocol {
 namespace {
+
+struct AsduLayout {
+    uint8_t cot_length = 0;
+    uint8_t common_address_length = 0;
+};
 
 bool is_link_mode_valid(iec101_link_mode_t mode) noexcept
 {
@@ -94,6 +100,40 @@ bool read_option_value(const void *value, uint32_t value_size, uint32_t &out) no
         return true;
     }
     return false;
+}
+
+AsduLayout get_asdu_layout(const iec_session_t &session) noexcept
+{
+    switch (session.profile) {
+    case Profile::M101: {
+        const auto &config = std::get<m101_master_config_t>(session.protocol_config);
+        return AsduLayout{config.cot_length, config.common_address_length};
+    }
+    case Profile::IEC101: {
+        const auto &config = std::get<iec101_master_config_t>(session.protocol_config);
+        return AsduLayout{config.cot_length, config.common_address_length};
+    }
+    case Profile::IEC104: {
+        const auto &config = std::get<iec104_master_config_t>(session.protocol_config);
+        return AsduLayout{config.cot_length, config.common_address_length};
+    }
+    }
+    return AsduLayout{};
+}
+
+uint16_t read_uint16_le(const uint8_t *data, uint8_t length) noexcept
+{
+    uint16_t value = 0;
+    for (uint8_t i = 0; i < length; ++i) {
+        value |= static_cast<uint16_t>(data[i]) << (i * 8U);
+    }
+    return value;
+}
+
+uint64_t monotonic_ns() noexcept
+{
+    const auto now = std::chrono::steady_clock::now().time_since_epoch();
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
 }
 
 void notify_state(iec_session_t *session, iec_runtime_state_t state) noexcept
@@ -306,6 +346,64 @@ iec_status_t set_option(iec_session_t *session, iec_option_t option, const void 
     default:
         return IEC_STATUS_INVALID_ARGUMENT;
     }
+}
+
+iec_status_t send_raw_asdu(iec_session_t *session, const iec_raw_asdu_tx_t *request) noexcept
+{
+    if (session == nullptr || request == nullptr || request->payload == nullptr || request->payload_size == 0 ||
+        request->bypass_high_level_validation > 1) {
+        return IEC_STATUS_INVALID_ARGUMENT;
+    }
+
+    iec_transport_t transport{};
+    iec_on_raw_asdu_fn callback = nullptr;
+    void *user_context = nullptr;
+    uint32_t timeout_ms = 0;
+    AsduLayout layout{};
+
+    {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        if (session->state != IEC_RUNTIME_RUNNING || session->config.enable_raw_asdu == 0) {
+            return IEC_STATUS_BAD_STATE;
+        }
+        if (request->payload_size > session->transport.max_plain_frame_len) {
+            return IEC_STATUS_INVALID_ARGUMENT;
+        }
+
+        layout = get_asdu_layout(*session);
+        const uint32_t minimum_asdu_size = 2U + layout.cot_length + layout.common_address_length;
+        if (layout.cot_length == 0 || layout.common_address_length == 0 ||
+            request->payload_size < minimum_asdu_size) {
+            return IEC_STATUS_INVALID_ARGUMENT;
+        }
+
+        transport = session->transport;
+        callback = session->callbacks.on_raw_asdu;
+        user_context = session->config.user_context;
+        timeout_ms = session->config.command_timeout_ms;
+    }
+
+    const int send_result = transport.send(transport.ctx, request->payload, request->payload_size, timeout_ms);
+    if (send_result != 0) {
+        return IEC_STATUS_IO_ERROR;
+    }
+
+    if (callback != nullptr) {
+        const uint32_t cause_offset = 2U;
+        const uint32_t common_address_offset = cause_offset + layout.cot_length;
+        iec_raw_asdu_event_t event{};
+        event.direction = IEC_RAW_ASDU_TX;
+        event.common_address =
+            read_uint16_le(request->payload + common_address_offset, layout.common_address_length);
+        event.type_id = request->payload[0];
+        event.cause_of_transmission = request->payload[cause_offset];
+        event.payload = request->payload;
+        event.payload_size = request->payload_size;
+        event.monotonic_ns = monotonic_ns();
+        callback(session, &event, user_context);
+    }
+
+    return IEC_STATUS_OK;
 }
 
 iec_status_t start_session(iec_session_t *session) noexcept

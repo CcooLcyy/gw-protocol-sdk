@@ -56,7 +56,20 @@ if(BUILD_TESTING)
         GW_iec101
         GW_iec104
     )
-    add_test(NAME gw_protocol_tests COMMAND gw_protocol_tests)
+    set(gw_protocol_test_cases
+        m101.validate_config
+        m101.lifecycle
+        m101.raw_asdu
+        iec101.validate_config
+        iec101.lifecycle
+        iec101.raw_asdu
+        iec104.validate_config
+        iec104.lifecycle
+        iec104.raw_asdu
+    )
+    foreach(test_case IN LISTS gw_protocol_test_cases)
+        add_test(NAME ${test_case} COMMAND gw_protocol_tests ${test_case})
+    endforeach()
 endif()
 
 add_executable(check_api_exports
