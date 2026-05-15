@@ -116,6 +116,12 @@ typedef struct iec_interrogation_request {
     uint8_t qualifier;
 } iec_interrogation_request_t;
 
+typedef struct iec_counter_interrogation_request {
+    uint16_t common_address;
+    uint8_t qualifier;
+    uint8_t freeze;
+} iec_counter_interrogation_request_t;
+
 typedef enum iec_raw_asdu_direction {
     IEC_RAW_ASDU_RX = 1,
     IEC_RAW_ASDU_TX = 2
@@ -245,6 +251,12 @@ GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL iec101_get_runtime_state(
 GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL iec101_general_interrogation(
     iec_session_t *session,
     const iec_interrogation_request_t *request);
+GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL iec101_counter_interrogation(
+    iec_session_t *session,
+    const iec_counter_interrogation_request_t *request);
+GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL iec101_read_point(
+    iec_session_t *session,
+    const iec_point_address_t *address);
 GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL iec101_set_option(
     iec_session_t *session,
     iec_option_t option,

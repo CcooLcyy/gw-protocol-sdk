@@ -45,10 +45,16 @@ constexpr uint8_t kAsduTypeMeasuredScaled = 11;
 constexpr uint8_t kAsduTypeMeasuredShortFloat = 13;
 constexpr uint8_t kAsduTypeIntegratedTotal = 15;
 constexpr uint8_t kAsduTypeGeneralInterrogation = 100;
+constexpr uint8_t kAsduTypeCounterInterrogation = 101;
+constexpr uint8_t kAsduTypeReadCommand = 102;
+constexpr uint8_t kCauseRequest = 5;
 constexpr uint8_t kCauseActivation = 6;
 constexpr uint8_t kDefaultOriginatorAddress = 0;
 constexpr uint8_t kGeneralInterrogationMinQualifier = 20;
 constexpr uint8_t kGeneralInterrogationMaxQualifier = 36;
+constexpr uint8_t kCounterInterrogationMinQualifier = 1;
+constexpr uint8_t kCounterInterrogationMaxQualifier = 5;
+constexpr uint8_t kCounterInterrogationMaxFreeze = 3;
 
 bool is_link_mode_valid(iec101_link_mode_t mode) noexcept
 {
@@ -688,6 +694,155 @@ iec_status_t general_interrogation(iec_session_t *session, const iec_interrogati
         write_uint_le(frame, frame_size, request->common_address, layout.common_address_length);
         write_uint_le(frame, frame_size, 0, layout.information_object_address_length);
         frame[frame_size++] = request->qualifier;
+
+        if (frame_size > session->transport.max_plain_frame_len) {
+            return IEC_STATUS_INVALID_ARGUMENT;
+        }
+
+        transport = session->transport;
+        raw_callback = session->callbacks.on_raw_asdu;
+        user_context = session->config.user_context;
+        timeout_ms = session->config.command_timeout_ms;
+        raw_enabled = session->config.enable_raw_asdu != 0;
+    }
+
+    const int send_result = transport.send(transport.ctx, frame, frame_size, timeout_ms);
+    if (send_result != 0) {
+        return IEC_STATUS_IO_ERROR;
+    }
+
+    if (raw_enabled) {
+        notify_raw_asdu(
+            session,
+            IEC_RAW_ASDU_TX,
+            frame,
+            frame_size,
+            layout,
+            raw_callback,
+            user_context);
+    }
+
+    return IEC_STATUS_OK;
+}
+
+iec_status_t counter_interrogation(
+    iec_session_t *session,
+    const iec_counter_interrogation_request_t *request) noexcept
+{
+    if (session == nullptr || request == nullptr) {
+        return IEC_STATUS_INVALID_ARGUMENT;
+    }
+    if (request->qualifier < kCounterInterrogationMinQualifier ||
+        request->qualifier > kCounterInterrogationMaxQualifier ||
+        request->freeze > kCounterInterrogationMaxFreeze) {
+        return IEC_STATUS_INVALID_ARGUMENT;
+    }
+
+    uint8_t frame[16]{};
+    uint32_t frame_size = 0;
+    iec_transport_t transport{};
+    iec_on_raw_asdu_fn raw_callback = nullptr;
+    void *user_context = nullptr;
+    uint32_t timeout_ms = 0;
+    bool raw_enabled = false;
+    AsduLayout layout{};
+
+    {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        if (session->state != IEC_RUNTIME_RUNNING) {
+            return IEC_STATUS_BAD_STATE;
+        }
+
+        layout = get_asdu_layout(*session);
+        if (layout.cot_length == 0 || layout.common_address_length == 0 ||
+            layout.information_object_address_length == 0 ||
+            !fits_uint_le(request->common_address, layout.common_address_length)) {
+            return IEC_STATUS_INVALID_ARGUMENT;
+        }
+
+        const uint8_t qualifier =
+            static_cast<uint8_t>((request->freeze << 6U) | request->qualifier);
+        frame[frame_size++] = kAsduTypeCounterInterrogation;
+        frame[frame_size++] = 1;
+        write_uint_le(frame, frame_size, kCauseActivation, 1);
+        if (layout.cot_length == 2) {
+            write_uint_le(frame, frame_size, kDefaultOriginatorAddress, 1);
+        }
+        write_uint_le(frame, frame_size, request->common_address, layout.common_address_length);
+        write_uint_le(frame, frame_size, 0, layout.information_object_address_length);
+        frame[frame_size++] = qualifier;
+
+        if (frame_size > session->transport.max_plain_frame_len) {
+            return IEC_STATUS_INVALID_ARGUMENT;
+        }
+
+        transport = session->transport;
+        raw_callback = session->callbacks.on_raw_asdu;
+        user_context = session->config.user_context;
+        timeout_ms = session->config.command_timeout_ms;
+        raw_enabled = session->config.enable_raw_asdu != 0;
+    }
+
+    const int send_result = transport.send(transport.ctx, frame, frame_size, timeout_ms);
+    if (send_result != 0) {
+        return IEC_STATUS_IO_ERROR;
+    }
+
+    if (raw_enabled) {
+        notify_raw_asdu(
+            session,
+            IEC_RAW_ASDU_TX,
+            frame,
+            frame_size,
+            layout,
+            raw_callback,
+            user_context);
+    }
+
+    return IEC_STATUS_OK;
+}
+
+iec_status_t read_point(iec_session_t *session, const iec_point_address_t *address) noexcept
+{
+    if (session == nullptr || address == nullptr) {
+        return IEC_STATUS_INVALID_ARGUMENT;
+    }
+
+    uint8_t frame[16]{};
+    uint32_t frame_size = 0;
+    iec_transport_t transport{};
+    iec_on_raw_asdu_fn raw_callback = nullptr;
+    void *user_context = nullptr;
+    uint32_t timeout_ms = 0;
+    bool raw_enabled = false;
+    AsduLayout layout{};
+
+    {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        if (session->state != IEC_RUNTIME_RUNNING) {
+            return IEC_STATUS_BAD_STATE;
+        }
+
+        layout = get_asdu_layout(*session);
+        if (layout.cot_length == 0 || layout.common_address_length == 0 ||
+            layout.information_object_address_length == 0 ||
+            !fits_uint_le(address->common_address, layout.common_address_length) ||
+            !fits_uint_le(address->information_object_address, layout.information_object_address_length)) {
+            return IEC_STATUS_INVALID_ARGUMENT;
+        }
+
+        frame[frame_size++] = kAsduTypeReadCommand;
+        frame[frame_size++] = 1;
+        write_uint_le(frame, frame_size, kCauseRequest, 1);
+        if (layout.cot_length == 2) {
+            write_uint_le(frame, frame_size, address->originator_address, 1);
+        }
+        write_uint_le(frame, frame_size, address->common_address, layout.common_address_length);
+        write_uint_le(
+            frame,
+            frame_size,
+            address->information_object_address,
+            layout.information_object_address_length);
 
         if (frame_size > session->transport.max_plain_frame_len) {
             return IEC_STATUS_INVALID_ARGUMENT;

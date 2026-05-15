@@ -739,6 +739,210 @@ void exercise_general_interrogation(
     std::printf("  %s general_interrogation\n", name);
 }
 
+template <
+    typename Config,
+    typename CreateFn,
+    typename DestroyFn,
+    typename StartFn,
+    typename StopFn,
+    typename CounterInterrogationFn>
+void exercise_counter_interrogation(
+    const char *name,
+    const Config &protocol_config,
+    CreateFn create,
+    DestroyFn destroy,
+    StartFn start,
+    StopFn stop,
+    CounterInterrogationFn counter_interrogation)
+{
+    StateRecorder recorder;
+    MockTransport mock;
+    auto common = make_common_config(recorder);
+    auto transport = make_transport(mock);
+    auto callbacks = make_callbacks();
+
+    iec_session_t *session = nullptr;
+    const iec_counter_interrogation_request_t request{1, 5, 0};
+    const iec_counter_interrogation_request_t invalid_qualifier{1, 0, 0};
+    const iec_counter_interrogation_request_t invalid_freeze{1, 5, 4};
+    const std::vector<uint8_t> expected_request{
+        101,
+        1,
+        6,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        5,
+    };
+    const std::vector<uint8_t> counter_response{
+        15,
+        1,
+        37,
+        0,
+        1,
+        0,
+        0x01,
+        0x40,
+        0x00,
+        0x78,
+        0x56,
+        0x34,
+        0x12,
+        0,
+    };
+
+    EXPECT_STATUS(counter_interrogation(nullptr, &request), IEC_STATUS_INVALID_ARGUMENT);
+    EXPECT_STATUS(create(&common, &protocol_config, &transport, &callbacks, &session), IEC_STATUS_OK);
+    EXPECT_TRUE(session != nullptr);
+
+    auto cleanup = [&] {
+        if (session != nullptr) {
+            (void)stop(session, 100);
+            (void)destroy(session);
+            session = nullptr;
+        }
+        close_transport(mock);
+    };
+
+    try {
+        EXPECT_STATUS(counter_interrogation(session, nullptr), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(counter_interrogation(session, &invalid_qualifier), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(counter_interrogation(session, &invalid_freeze), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(counter_interrogation(session, &request), IEC_STATUS_BAD_STATE);
+
+        EXPECT_STATUS(start(session), IEC_STATUS_OK);
+        EXPECT_TRUE(recorder.wait_until_contains(IEC_RUNTIME_RUNNING));
+        EXPECT_STATUS(counter_interrogation(session, &request), IEC_STATUS_OK);
+        EXPECT_TRUE(mock.send_count == 1);
+        EXPECT_TRUE(mock.last_sent == expected_request);
+
+        push_recv(mock, counter_response);
+        EXPECT_TRUE(recorder.wait_until_point_count(1));
+        const auto points = recorder.point_snapshot();
+        EXPECT_TRUE(points.size() == 1);
+        EXPECT_TRUE(points[0].address.common_address == 1);
+        EXPECT_TRUE(points[0].address.information_object_address == 0x4001);
+        EXPECT_TRUE(points[0].address.type_id == 15);
+        EXPECT_TRUE(points[0].address.cause_of_transmission == 37);
+        EXPECT_TRUE(points[0].address.originator_address == 0);
+        EXPECT_TRUE(points[0].value.point_type == IEC_POINT_INTEGRATED_TOTAL);
+        EXPECT_TRUE(points[0].value.data.integrated_total == 0x12345678);
+        EXPECT_TRUE(points[0].value.quality == 0);
+
+        EXPECT_STATUS(stop(session, 1000), IEC_STATUS_OK);
+        EXPECT_STATUS(destroy(session), IEC_STATUS_OK);
+        session = nullptr;
+        close_transport(mock);
+    } catch (...) {
+        cleanup();
+        throw;
+    }
+
+    std::printf("  %s counter_interrogation\n", name);
+}
+
+template <
+    typename Config,
+    typename CreateFn,
+    typename DestroyFn,
+    typename StartFn,
+    typename StopFn,
+    typename ReadPointFn>
+void exercise_read_point(
+    const char *name,
+    const Config &protocol_config,
+    CreateFn create,
+    DestroyFn destroy,
+    StartFn start,
+    StopFn stop,
+    ReadPointFn read_point)
+{
+    StateRecorder recorder;
+    MockTransport mock;
+    auto common = make_common_config(recorder);
+    auto transport = make_transport(mock);
+    auto callbacks = make_callbacks();
+
+    iec_session_t *session = nullptr;
+    const iec_point_address_t address{1, 0x4001, 0, 0, 7};
+    iec_point_address_t invalid_address = address;
+    invalid_address.information_object_address = 0x01000000;
+    const std::vector<uint8_t> expected_request{
+        102,
+        1,
+        5,
+        7,
+        1,
+        0,
+        0x01,
+        0x40,
+        0x00,
+    };
+    const std::vector<uint8_t> point_response{
+        1,
+        1,
+        5,
+        7,
+        1,
+        0,
+        0x01,
+        0x40,
+        0x00,
+        0x01,
+    };
+
+    EXPECT_STATUS(read_point(nullptr, &address), IEC_STATUS_INVALID_ARGUMENT);
+    EXPECT_STATUS(create(&common, &protocol_config, &transport, &callbacks, &session), IEC_STATUS_OK);
+    EXPECT_TRUE(session != nullptr);
+
+    auto cleanup = [&] {
+        if (session != nullptr) {
+            (void)stop(session, 100);
+            (void)destroy(session);
+            session = nullptr;
+        }
+        close_transport(mock);
+    };
+
+    try {
+        EXPECT_STATUS(read_point(session, nullptr), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(read_point(session, &address), IEC_STATUS_BAD_STATE);
+
+        EXPECT_STATUS(start(session), IEC_STATUS_OK);
+        EXPECT_TRUE(recorder.wait_until_contains(IEC_RUNTIME_RUNNING));
+        EXPECT_STATUS(read_point(session, &invalid_address), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(read_point(session, &address), IEC_STATUS_OK);
+        EXPECT_TRUE(mock.send_count == 1);
+        EXPECT_TRUE(mock.last_sent == expected_request);
+
+        push_recv(mock, point_response);
+        EXPECT_TRUE(recorder.wait_until_point_count(1));
+        const auto points = recorder.point_snapshot();
+        EXPECT_TRUE(points.size() == 1);
+        EXPECT_TRUE(points[0].address.common_address == 1);
+        EXPECT_TRUE(points[0].address.information_object_address == 0x4001);
+        EXPECT_TRUE(points[0].address.type_id == 1);
+        EXPECT_TRUE(points[0].address.cause_of_transmission == 5);
+        EXPECT_TRUE(points[0].address.originator_address == 7);
+        EXPECT_TRUE(points[0].value.point_type == IEC_POINT_SINGLE);
+        EXPECT_TRUE(points[0].value.data.single == 1);
+        EXPECT_TRUE(points[0].value.quality == 0);
+
+        EXPECT_STATUS(stop(session, 1000), IEC_STATUS_OK);
+        EXPECT_STATUS(destroy(session), IEC_STATUS_OK);
+        session = nullptr;
+        close_transport(mock);
+    } catch (...) {
+        cleanup();
+        throw;
+    }
+
+    std::printf("  %s read_point\n", name);
+}
+
 void test_iec101_validate_config()
 {
     auto valid = make_iec101_config();
@@ -818,6 +1022,48 @@ void test_iec101_general_interrogation()
         [](iec_session_t *session, uint32_t timeout_ms) { return iec101_stop(session, timeout_ms); },
         [](iec_session_t *session, const iec_interrogation_request_t *request) {
             return iec101_general_interrogation(session, request);
+        });
+}
+
+void test_iec101_counter_interrogation()
+{
+    const auto valid = make_iec101_config();
+    exercise_counter_interrogation(
+        "iec101",
+        valid,
+        [](const iec_session_config_t *common,
+           const iec101_master_config_t *config,
+           const iec_transport_t *transport,
+           const iec_callbacks_t *callbacks,
+           iec_session_t **out_session) {
+            return iec101_create(common, config, transport, callbacks, out_session);
+        },
+        [](iec_session_t *session) { return iec101_destroy(session); },
+        [](iec_session_t *session) { return iec101_start(session); },
+        [](iec_session_t *session, uint32_t timeout_ms) { return iec101_stop(session, timeout_ms); },
+        [](iec_session_t *session, const iec_counter_interrogation_request_t *request) {
+            return iec101_counter_interrogation(session, request);
+        });
+}
+
+void test_iec101_read_point()
+{
+    const auto valid = make_iec101_config();
+    exercise_read_point(
+        "iec101",
+        valid,
+        [](const iec_session_config_t *common,
+           const iec101_master_config_t *config,
+           const iec_transport_t *transport,
+           const iec_callbacks_t *callbacks,
+           iec_session_t **out_session) {
+            return iec101_create(common, config, transport, callbacks, out_session);
+        },
+        [](iec_session_t *session) { return iec101_destroy(session); },
+        [](iec_session_t *session) { return iec101_start(session); },
+        [](iec_session_t *session, uint32_t timeout_ms) { return iec101_stop(session, timeout_ms); },
+        [](iec_session_t *session, const iec_point_address_t *address) {
+            return iec101_read_point(session, address);
         });
 }
 
@@ -903,6 +1149,48 @@ void test_m101_general_interrogation()
         });
 }
 
+void test_m101_counter_interrogation()
+{
+    const auto valid = make_m101_config();
+    exercise_counter_interrogation(
+        "m101",
+        valid,
+        [](const iec_session_config_t *common,
+           const m101_master_config_t *config,
+           const iec_transport_t *transport,
+           const iec_callbacks_t *callbacks,
+           iec_session_t **out_session) {
+            return m101_create(common, config, transport, callbacks, out_session);
+        },
+        [](iec_session_t *session) { return m101_destroy(session); },
+        [](iec_session_t *session) { return m101_start(session); },
+        [](iec_session_t *session, uint32_t timeout_ms) { return m101_stop(session, timeout_ms); },
+        [](iec_session_t *session, const iec_counter_interrogation_request_t *request) {
+            return m101_counter_interrogation(session, request);
+        });
+}
+
+void test_m101_read_point()
+{
+    const auto valid = make_m101_config();
+    exercise_read_point(
+        "m101",
+        valid,
+        [](const iec_session_config_t *common,
+           const m101_master_config_t *config,
+           const iec_transport_t *transport,
+           const iec_callbacks_t *callbacks,
+           iec_session_t **out_session) {
+            return m101_create(common, config, transport, callbacks, out_session);
+        },
+        [](iec_session_t *session) { return m101_destroy(session); },
+        [](iec_session_t *session) { return m101_start(session); },
+        [](iec_session_t *session, uint32_t timeout_ms) { return m101_stop(session, timeout_ms); },
+        [](iec_session_t *session, const iec_point_address_t *address) {
+            return m101_read_point(session, address);
+        });
+}
+
 void test_iec104_validate_config()
 {
     auto valid = make_iec104_config();
@@ -985,6 +1273,48 @@ void test_iec104_general_interrogation()
         });
 }
 
+void test_iec104_counter_interrogation()
+{
+    const auto valid = make_iec104_config();
+    exercise_counter_interrogation(
+        "iec104",
+        valid,
+        [](const iec_session_config_t *common,
+           const iec104_master_config_t *config,
+           const iec_transport_t *transport,
+           const iec_callbacks_t *callbacks,
+           iec_session_t **out_session) {
+            return iec104_create(common, config, transport, callbacks, out_session);
+        },
+        [](iec_session_t *session) { return iec104_destroy(session); },
+        [](iec_session_t *session) { return iec104_start(session); },
+        [](iec_session_t *session, uint32_t timeout_ms) { return iec104_stop(session, timeout_ms); },
+        [](iec_session_t *session, const iec_counter_interrogation_request_t *request) {
+            return iec104_counter_interrogation(session, request);
+        });
+}
+
+void test_iec104_read_point()
+{
+    const auto valid = make_iec104_config();
+    exercise_read_point(
+        "iec104",
+        valid,
+        [](const iec_session_config_t *common,
+           const iec104_master_config_t *config,
+           const iec_transport_t *transport,
+           const iec_callbacks_t *callbacks,
+           iec_session_t **out_session) {
+            return iec104_create(common, config, transport, callbacks, out_session);
+        },
+        [](iec_session_t *session) { return iec104_destroy(session); },
+        [](iec_session_t *session) { return iec104_start(session); },
+        [](iec_session_t *session, uint32_t timeout_ms) { return iec104_stop(session, timeout_ms); },
+        [](iec_session_t *session, const iec_point_address_t *address) {
+            return iec104_read_point(session, address);
+        });
+}
+
 struct TestCase {
     const char *name;
     void (*run)();
@@ -1008,14 +1338,20 @@ int gw_protocol_run_lifecycle_tests(const char *filter)
         {"m101.lifecycle", test_m101_lifecycle},
         {"m101.raw_asdu", test_m101_raw_asdu},
         {"m101.general_interrogation", test_m101_general_interrogation},
+        {"m101.counter_interrogation", test_m101_counter_interrogation},
+        {"m101.read_point", test_m101_read_point},
         {"iec101.validate_config", test_iec101_validate_config},
         {"iec101.lifecycle", test_iec101_lifecycle},
         {"iec101.raw_asdu", test_iec101_raw_asdu},
         {"iec101.general_interrogation", test_iec101_general_interrogation},
+        {"iec101.counter_interrogation", test_iec101_counter_interrogation},
+        {"iec101.read_point", test_iec101_read_point},
         {"iec104.validate_config", test_iec104_validate_config},
         {"iec104.lifecycle", test_iec104_lifecycle},
         {"iec104.raw_asdu", test_iec104_raw_asdu},
         {"iec104.general_interrogation", test_iec104_general_interrogation},
+        {"iec104.counter_interrogation", test_iec104_counter_interrogation},
+        {"iec104.read_point", test_iec104_read_point},
     };
 
     int failures = 0;
