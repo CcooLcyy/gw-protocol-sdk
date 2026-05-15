@@ -60,6 +60,22 @@ GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL iec101_read_point(
     return gw::protocol::read_point(session, address);
 }
 
+GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL iec101_clock_sync(
+    iec_session_t *session,
+    const iec_clock_sync_request_t *request,
+    uint32_t *out_request_id)
+{
+    return gw::protocol::clock_sync(session, request, out_request_id);
+}
+
+GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL iec101_read_clock(
+    iec_session_t *session,
+    const iec_clock_read_request_t *request,
+    uint32_t *out_request_id)
+{
+    return gw::protocol::read_clock(session, request, out_request_id);
+}
+
 GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL iec101_set_option(
     iec_session_t *session,
     iec_option_t option,

@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <ctime>
 #include <mutex>
 #include <new>
 #include <thread>
@@ -17,6 +18,12 @@ struct iec_session {
         iec_point_address_t address{};
     };
 
+    struct PendingClock {
+        uint32_t request_id = 0;
+        iec_clock_operation_t operation = IEC_CLOCK_OPERATION_SYNC;
+        uint16_t common_address = 0;
+    };
+
     gw::protocol::Profile profile;
     iec_session_config_t config;
     iec_transport_t transport;
@@ -25,9 +32,11 @@ struct iec_session {
     mutable std::mutex mutex;
     std::thread worker;
     std::vector<PendingCommand> pending_commands;
+    std::vector<PendingClock> pending_clocks;
     bool stop_requested = false;
     iec_runtime_state_t state = IEC_RUNTIME_CREATED;
     uint32_t next_command_id = 1;
+    uint32_t next_request_id = 1;
 };
 
 namespace gw::protocol {
@@ -61,8 +70,10 @@ constexpr uint8_t kAsduTypeSetpointFloat = 50;
 constexpr uint8_t kAsduTypeGeneralInterrogation = 100;
 constexpr uint8_t kAsduTypeCounterInterrogation = 101;
 constexpr uint8_t kAsduTypeReadCommand = 102;
+constexpr uint8_t kAsduTypeClockSync = 103;
 constexpr uint8_t kCauseRequest = 5;
 constexpr uint8_t kCauseActivation = 6;
+constexpr uint8_t kCauseActivationConfirm = 7;
 constexpr uint8_t kDefaultOriginatorAddress = 0;
 constexpr uint8_t kGeneralInterrogationMinQualifier = 20;
 constexpr uint8_t kGeneralInterrogationMaxQualifier = 36;
@@ -70,6 +81,7 @@ constexpr uint8_t kCounterInterrogationMinQualifier = 1;
 constexpr uint8_t kCounterInterrogationMaxQualifier = 5;
 constexpr uint8_t kCounterInterrogationMaxFreeze = 3;
 constexpr uint8_t kSelectExecuteQualifierMask = 0x80;
+constexpr uint32_t kClockSyncInformationObjectAddress = 0;
 
 bool is_link_mode_valid(iec101_link_mode_t mode) noexcept
 {
@@ -272,6 +284,41 @@ void write_float_le(uint8_t *buffer, uint32_t &offset, float value) noexcept
     write_uint_le(buffer, offset, raw, 4);
 }
 
+bool write_cp56_time2a(uint8_t *buffer, uint32_t &offset, const iec_timestamp_t &timestamp) noexcept
+{
+    if (timestamp.msec > 59999 || timestamp.minute > 59 || timestamp.hour > 23 || timestamp.day < 1 ||
+        timestamp.day > 31 || timestamp.month < 1 || timestamp.month > 12 || timestamp.year > 99 ||
+        timestamp.invalid > 1) {
+        return false;
+    }
+
+    write_uint_le(buffer, offset, timestamp.msec, 2);
+    buffer[offset++] = static_cast<uint8_t>(timestamp.minute | (timestamp.invalid != 0 ? 0x80U : 0U));
+    buffer[offset++] = timestamp.hour;
+    buffer[offset++] = timestamp.day;
+    buffer[offset++] = timestamp.month;
+    buffer[offset++] = timestamp.year;
+    return true;
+}
+
+bool read_cp56_time2a(const uint8_t *data, uint32_t available, iec_timestamp_t &out) noexcept
+{
+    if (data == nullptr || available < 7) {
+        return false;
+    }
+
+    out = iec_timestamp_t{};
+    out.msec = read_uint16_le(data, 2);
+    out.minute = static_cast<uint8_t>(data[2] & 0x3FU);
+    out.invalid = static_cast<uint8_t>((data[2] & 0x80U) != 0 ? 1U : 0U);
+    out.hour = static_cast<uint8_t>(data[3] & 0x1FU);
+    out.day = static_cast<uint8_t>(data[4] & 0x1FU);
+    out.month = static_cast<uint8_t>(data[5] & 0x0FU);
+    out.year = static_cast<uint8_t>(data[6] & 0x7FU);
+    return out.msec <= 59999 && out.minute <= 59 && out.hour <= 23 && out.day >= 1 && out.day <= 31 &&
+        out.month >= 1 && out.month <= 12 && out.year <= 99;
+}
+
 bool fits_uint_le(uint32_t value, uint8_t length) noexcept
 {
     if (length >= sizeof(uint32_t)) {
@@ -285,6 +332,39 @@ uint64_t monotonic_ns() noexcept
 {
     const auto now = std::chrono::steady_clock::now().time_since_epoch();
     return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
+}
+
+iec_timestamp_t current_system_timestamp() noexcept
+{
+    iec_timestamp_t timestamp{};
+    const auto now = std::chrono::system_clock::now();
+    const auto milliseconds =
+        std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+    const std::time_t seconds = std::chrono::system_clock::to_time_t(now);
+    std::tm local_time{};
+#if defined(_WIN32)
+    localtime_s(&local_time, &seconds);
+#else
+    localtime_r(&seconds, &local_time);
+#endif
+    timestamp.msec =
+        static_cast<uint16_t>(local_time.tm_sec * 1000 + static_cast<int>(milliseconds % 1000));
+    timestamp.minute = static_cast<uint8_t>(local_time.tm_min);
+    timestamp.hour = static_cast<uint8_t>(local_time.tm_hour);
+    timestamp.day = static_cast<uint8_t>(local_time.tm_mday);
+    timestamp.month = static_cast<uint8_t>(local_time.tm_mon + 1);
+    timestamp.year = static_cast<uint8_t>((local_time.tm_year + 1900) % 100);
+    timestamp.invalid = 0;
+    return timestamp;
+}
+
+uint32_t take_next_request_id(iec_session_t &session) noexcept
+{
+    const uint32_t request_id = session.next_request_id++;
+    if (session.next_request_id == 0) {
+        session.next_request_id = 1;
+    }
+    return request_id;
 }
 
 void notify_state(iec_session_t *session, iec_runtime_state_t state) noexcept
@@ -597,6 +677,83 @@ void dispatch_command_result(
     callback(session, &result, user_context);
 }
 
+void dispatch_clock_result(
+    iec_session_t *session,
+    const uint8_t *payload,
+    uint32_t payload_size,
+    const AsduLayout &layout,
+    iec_on_clock_result_fn callback,
+    void *user_context) noexcept
+{
+    if (callback == nullptr || payload == nullptr || payload_size < 2U + layout.cot_length +
+            layout.common_address_length + layout.information_object_address_length) {
+        return;
+    }
+    if (payload[0] != kAsduTypeClockSync || (payload[1] & 0x7FU) == 0) {
+        return;
+    }
+
+    const uint32_t cause_offset = 2U;
+    const uint8_t raw_cause = payload[cause_offset];
+    const uint8_t cause = static_cast<uint8_t>(raw_cause & 0x3FU);
+    const uint32_t common_address_offset = cause_offset + layout.cot_length;
+    const uint16_t common_address =
+        read_uint16_le(payload + common_address_offset, layout.common_address_length);
+    const uint32_t info_offset = common_address_offset + layout.common_address_length;
+    const uint32_t time_offset = info_offset + layout.information_object_address_length;
+
+    iec_timestamp_t timestamp{};
+    const bool timestamp_present = read_cp56_time2a(payload + time_offset, payload_size - time_offset, timestamp);
+
+    iec_clock_result_t result{};
+    result.common_address = common_address;
+    result.result =
+        (raw_cause & 0x40U) != 0 ? IEC_CLOCK_RESULT_NEGATIVE_CONFIRM : IEC_CLOCK_RESULT_ACCEPTED;
+    result.cause_of_transmission = cause;
+
+    {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        auto match = session->pending_clocks.end();
+        if (cause == kCauseActivationConfirm) {
+            match = std::find_if(
+                session->pending_clocks.begin(),
+                session->pending_clocks.end(),
+                [common_address](const iec_session_t::PendingClock &pending) {
+                    return pending.common_address == common_address &&
+                        pending.operation == IEC_CLOCK_OPERATION_SYNC;
+                });
+        }
+        if (match == session->pending_clocks.end()) {
+            match = std::find_if(
+                session->pending_clocks.begin(),
+                session->pending_clocks.end(),
+                [common_address, timestamp_present](const iec_session_t::PendingClock &pending) {
+                    return pending.common_address == common_address &&
+                        timestamp_present &&
+                        pending.operation == IEC_CLOCK_OPERATION_READ;
+                });
+        }
+        if (match == session->pending_clocks.end()) {
+            return;
+        }
+
+        result.request_id = match->request_id;
+        result.operation = match->operation;
+        session->pending_clocks.erase(match);
+    }
+
+    if (result.operation == IEC_CLOCK_OPERATION_READ) {
+        if (timestamp_present) {
+            result.has_timestamp = 1;
+            result.timestamp = timestamp;
+        } else if (result.result == IEC_CLOCK_RESULT_ACCEPTED) {
+            result.result = IEC_CLOCK_RESULT_PROTOCOL_ERROR;
+        }
+    }
+
+    callback(session, &result, user_context);
+}
+
 void dispatch_point_indications(
     iec_session_t *session,
     const uint8_t *payload,
@@ -686,6 +843,7 @@ void receive_worker(iec_session_t *session) noexcept
         iec_on_raw_asdu_fn raw_callback = nullptr;
         iec_on_point_indication_fn point_callback = nullptr;
         iec_on_command_result_fn command_callback = nullptr;
+        iec_on_clock_result_fn clock_callback = nullptr;
         void *user_context = nullptr;
         uint32_t recv_timeout_ms = 50;
         uint32_t max_frame_len = 0;
@@ -701,6 +859,7 @@ void receive_worker(iec_session_t *session) noexcept
             raw_callback = session->callbacks.on_raw_asdu;
             point_callback = session->callbacks.on_point_indication;
             command_callback = session->callbacks.on_command_result;
+            clock_callback = session->callbacks.on_clock_result;
             user_context = session->config.user_context;
             recv_timeout_ms = std::min<uint32_t>(session->config.command_timeout_ms, 50U);
             if (recv_timeout_ms == 0) {
@@ -754,6 +913,13 @@ void receive_worker(iec_session_t *session) noexcept
             received,
             layout,
             command_callback,
+            user_context);
+        dispatch_clock_result(
+            session,
+            buffer.data(),
+            received,
+            layout,
+            clock_callback,
             user_context);
     }
 }
@@ -1243,6 +1409,208 @@ iec_status_t read_point(iec_session_t *session, const iec_point_address_t *addre
     if (send_result != 0) {
         return IEC_STATUS_IO_ERROR;
     }
+
+    if (raw_enabled) {
+        notify_raw_asdu(
+            session,
+            IEC_RAW_ASDU_TX,
+            frame,
+            frame_size,
+            layout,
+            raw_callback,
+            user_context);
+    }
+
+    return IEC_STATUS_OK;
+}
+
+iec_status_t clock_sync(
+    iec_session_t *session,
+    const iec_clock_sync_request_t *request,
+    uint32_t *out_request_id) noexcept
+{
+    if (out_request_id != nullptr) {
+        *out_request_id = 0;
+    }
+    if (session == nullptr || request == nullptr || out_request_id == nullptr ||
+        request->use_current_system_time > 1) {
+        return IEC_STATUS_INVALID_ARGUMENT;
+    }
+
+    uint8_t frame[24]{};
+    uint32_t frame_size = 0;
+    uint32_t request_id = 0;
+    iec_transport_t transport{};
+    iec_on_raw_asdu_fn raw_callback = nullptr;
+    void *user_context = nullptr;
+    uint32_t timeout_ms = 0;
+    bool raw_enabled = false;
+    AsduLayout layout{};
+    const iec_timestamp_t timestamp =
+        request->use_current_system_time != 0 ? current_system_timestamp() : request->timestamp;
+
+    {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        if (session->state != IEC_RUNTIME_RUNNING) {
+            return IEC_STATUS_BAD_STATE;
+        }
+
+        layout = get_asdu_layout(*session);
+        if (layout.cot_length == 0 || layout.common_address_length == 0 ||
+            layout.information_object_address_length == 0 ||
+            !fits_uint_le(request->common_address, layout.common_address_length)) {
+            return IEC_STATUS_INVALID_ARGUMENT;
+        }
+
+        frame[frame_size++] = kAsduTypeClockSync;
+        frame[frame_size++] = 1;
+        write_uint_le(frame, frame_size, kCauseActivation, 1);
+        if (layout.cot_length == 2) {
+            write_uint_le(frame, frame_size, kDefaultOriginatorAddress, 1);
+        }
+        write_uint_le(frame, frame_size, request->common_address, layout.common_address_length);
+        write_uint_le(
+            frame,
+            frame_size,
+            kClockSyncInformationObjectAddress,
+            layout.information_object_address_length);
+        if (!write_cp56_time2a(frame, frame_size, timestamp)) {
+            return IEC_STATUS_INVALID_ARGUMENT;
+        }
+
+        if (frame_size > session->transport.max_plain_frame_len) {
+            return IEC_STATUS_INVALID_ARGUMENT;
+        }
+
+        request_id = take_next_request_id(*session);
+        session->pending_clocks.push_back(iec_session_t::PendingClock{
+            request_id,
+            IEC_CLOCK_OPERATION_SYNC,
+            request->common_address,
+        });
+        transport = session->transport;
+        raw_callback = session->callbacks.on_raw_asdu;
+        user_context = session->config.user_context;
+        timeout_ms = session->config.command_timeout_ms;
+        raw_enabled = session->config.enable_raw_asdu != 0;
+    }
+
+    const int send_result = transport.send(transport.ctx, frame, frame_size, timeout_ms);
+    if (send_result != 0) {
+        {
+            std::lock_guard<std::mutex> lock(session->mutex);
+            auto match = std::find_if(
+                session->pending_clocks.begin(),
+                session->pending_clocks.end(),
+                [request_id](const iec_session_t::PendingClock &pending) {
+                    return pending.request_id == request_id;
+                });
+            if (match != session->pending_clocks.end()) {
+                session->pending_clocks.erase(match);
+            }
+        }
+        return IEC_STATUS_IO_ERROR;
+    }
+
+    *out_request_id = request_id;
+
+    if (raw_enabled) {
+        notify_raw_asdu(
+            session,
+            IEC_RAW_ASDU_TX,
+            frame,
+            frame_size,
+            layout,
+            raw_callback,
+            user_context);
+    }
+
+    return IEC_STATUS_OK;
+}
+
+iec_status_t read_clock(
+    iec_session_t *session,
+    const iec_clock_read_request_t *request,
+    uint32_t *out_request_id) noexcept
+{
+    if (out_request_id != nullptr) {
+        *out_request_id = 0;
+    }
+    if (session == nullptr || request == nullptr || out_request_id == nullptr) {
+        return IEC_STATUS_INVALID_ARGUMENT;
+    }
+
+    uint8_t frame[16]{};
+    uint32_t frame_size = 0;
+    uint32_t request_id = 0;
+    iec_transport_t transport{};
+    iec_on_raw_asdu_fn raw_callback = nullptr;
+    void *user_context = nullptr;
+    uint32_t timeout_ms = 0;
+    bool raw_enabled = false;
+    AsduLayout layout{};
+
+    {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        if (session->state != IEC_RUNTIME_RUNNING) {
+            return IEC_STATUS_BAD_STATE;
+        }
+
+        layout = get_asdu_layout(*session);
+        if (layout.cot_length == 0 || layout.common_address_length == 0 ||
+            layout.information_object_address_length == 0 ||
+            !fits_uint_le(request->common_address, layout.common_address_length)) {
+            return IEC_STATUS_INVALID_ARGUMENT;
+        }
+
+        frame[frame_size++] = kAsduTypeReadCommand;
+        frame[frame_size++] = 1;
+        write_uint_le(frame, frame_size, kCauseRequest, 1);
+        if (layout.cot_length == 2) {
+            write_uint_le(frame, frame_size, kDefaultOriginatorAddress, 1);
+        }
+        write_uint_le(frame, frame_size, request->common_address, layout.common_address_length);
+        write_uint_le(
+            frame,
+            frame_size,
+            kClockSyncInformationObjectAddress,
+            layout.information_object_address_length);
+
+        if (frame_size > session->transport.max_plain_frame_len) {
+            return IEC_STATUS_INVALID_ARGUMENT;
+        }
+
+        request_id = take_next_request_id(*session);
+        session->pending_clocks.push_back(iec_session_t::PendingClock{
+            request_id,
+            IEC_CLOCK_OPERATION_READ,
+            request->common_address,
+        });
+        transport = session->transport;
+        raw_callback = session->callbacks.on_raw_asdu;
+        user_context = session->config.user_context;
+        timeout_ms = session->config.command_timeout_ms;
+        raw_enabled = session->config.enable_raw_asdu != 0;
+    }
+
+    const int send_result = transport.send(transport.ctx, frame, frame_size, timeout_ms);
+    if (send_result != 0) {
+        {
+            std::lock_guard<std::mutex> lock(session->mutex);
+            auto match = std::find_if(
+                session->pending_clocks.begin(),
+                session->pending_clocks.end(),
+                [request_id](const iec_session_t::PendingClock &pending) {
+                    return pending.request_id == request_id;
+                });
+            if (match != session->pending_clocks.end()) {
+                session->pending_clocks.erase(match);
+            }
+        }
+        return IEC_STATUS_IO_ERROR;
+    }
+
+    *out_request_id = request_id;
 
     if (raw_enabled) {
         notify_raw_asdu(

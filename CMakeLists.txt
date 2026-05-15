@@ -64,6 +64,7 @@ if(BUILD_TESTING)
         m101.counter_interrogation
         m101.control_point
         m101.read_point
+        m101.clock
         iec101.validate_config
         iec101.lifecycle
         iec101.raw_asdu
@@ -71,6 +72,7 @@ if(BUILD_TESTING)
         iec101.counter_interrogation
         iec101.control_point
         iec101.read_point
+        iec101.clock
         iec104.validate_config
         iec104.lifecycle
         iec104.raw_asdu
@@ -78,6 +80,7 @@ if(BUILD_TESTING)
         iec104.counter_interrogation
         iec104.control_point
         iec104.read_point
+        iec104.clock
     )
     foreach(test_case IN LISTS gw_protocol_test_cases)
         add_test(NAME ${test_case} COMMAND gw_protocol_tests ${test_case})

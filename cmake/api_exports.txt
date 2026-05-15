@@ -13,6 +13,8 @@ GW_m101:m101_general_interrogation
 GW_m101:m101_counter_interrogation
 GW_m101:m101_control_point
 GW_m101:m101_read_point
+GW_m101:m101_clock_sync
+GW_m101:m101_read_clock
 GW_m101:m101_set_option
 GW_m101:m101_send_raw_asdu
 GW_m101:m101_validate_config
@@ -27,6 +29,8 @@ GW_iec101:iec101_general_interrogation
 GW_iec101:iec101_counter_interrogation
 GW_iec101:iec101_control_point
 GW_iec101:iec101_read_point
+GW_iec101:iec101_clock_sync
+GW_iec101:iec101_read_clock
 GW_iec101:iec101_set_option
 GW_iec101:iec101_send_raw_asdu
 GW_iec101:iec101_validate_config
@@ -41,6 +45,8 @@ GW_iec104:iec104_general_interrogation
 GW_iec104:iec104_counter_interrogation
 GW_iec104:iec104_control_point
 GW_iec104:iec104_read_point
+GW_iec104:iec104_clock_sync
+GW_iec104:iec104_read_clock
 GW_iec104:iec104_set_option
 GW_iec104:iec104_send_raw_asdu
 GW_iec104:iec104_validate_config

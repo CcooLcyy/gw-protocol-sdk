@@ -226,11 +226,26 @@ struct StateRecorder {
 
     std::vector<CommandEvent> command_events;
 
+    struct ClockEvent {
+        iec_clock_result_t result{};
+    };
+
+    std::vector<ClockEvent> clock_events;
+
     void record(iec_runtime_state_t state)
     {
         {
             std::lock_guard<std::mutex> lock(mutex);
             states.push_back(state);
+        }
+        cv.notify_all();
+    }
+
+    void record_clock(const iec_clock_result_t &result)
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            clock_events.push_back(ClockEvent{result});
         }
         cv.notify_all();
     }
@@ -297,6 +312,12 @@ struct StateRecorder {
         return command_events;
     }
 
+    std::vector<ClockEvent> clock_snapshot() const
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        return clock_events;
+    }
+
     bool wait_until_contains(iec_runtime_state_t state)
     {
         std::unique_lock<std::mutex> lock(mutex);
@@ -318,6 +339,14 @@ struct StateRecorder {
         std::unique_lock<std::mutex> lock(mutex);
         return cv.wait_for(lock, kStateWaitTimeout, [&] {
             return command_events.size() >= count;
+        });
+    }
+
+    bool wait_until_clock_count(std::size_t count)
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        return cv.wait_for(lock, kStateWaitTimeout, [&] {
+            return clock_events.size() >= count;
         });
     }
 };
@@ -366,6 +395,16 @@ void on_command_result(iec_session_t *session, const iec_command_result_t *resul
     recorder->record_command(*result);
 }
 
+void on_clock_result(iec_session_t *session, const iec_clock_result_t *result, void *user_context)
+{
+    (void)session;
+    auto *recorder = static_cast<StateRecorder *>(user_context);
+    if (recorder == nullptr || result == nullptr) {
+        return;
+    }
+    recorder->record_clock(*result);
+}
+
 iec_session_config_t make_common_config(StateRecorder &recorder)
 {
     iec_session_config_t config{};
@@ -397,6 +436,7 @@ iec_callbacks_t make_callbacks()
     callbacks.on_point_indication = on_point_indication;
     callbacks.on_command_result = on_command_result;
     callbacks.on_raw_asdu = on_raw_asdu;
+    callbacks.on_clock_result = on_clock_result;
     return callbacks;
 }
 
@@ -1127,6 +1167,197 @@ void exercise_read_point(
     std::printf("  %s read_point\n", name);
 }
 
+template <
+    typename Config,
+    typename CreateFn,
+    typename DestroyFn,
+    typename StartFn,
+    typename StopFn,
+    typename ClockSyncFn,
+    typename ReadClockFn>
+void exercise_clock(
+    const char *name,
+    const Config &protocol_config,
+    CreateFn create,
+    DestroyFn destroy,
+    StartFn start,
+    StopFn stop,
+    ClockSyncFn clock_sync,
+    ReadClockFn read_clock)
+{
+    StateRecorder recorder;
+    MockTransport mock;
+    auto common = make_common_config(recorder);
+    auto transport = make_transport(mock);
+    auto callbacks = make_callbacks();
+
+    iec_session_t *session = nullptr;
+    iec_clock_sync_request_t sync_request{};
+    sync_request.common_address = 1;
+    sync_request.use_current_system_time = 0;
+    sync_request.timestamp.msec = 1234;
+    sync_request.timestamp.minute = 56;
+    sync_request.timestamp.hour = 7;
+    sync_request.timestamp.day = 8;
+    sync_request.timestamp.month = 9;
+    sync_request.timestamp.year = 26;
+
+    auto invalid_sync = sync_request;
+    invalid_sync.timestamp.minute = 60;
+    auto invalid_flag = sync_request;
+    invalid_flag.use_current_system_time = 2;
+
+    const iec_clock_read_request_t read_request{1};
+    const std::vector<uint8_t> expected_sync_request{
+        103,
+        1,
+        6,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0xd2,
+        0x04,
+        56,
+        7,
+        8,
+        9,
+        26,
+    };
+    const std::vector<uint8_t> expected_read_request{
+        102,
+        1,
+        5,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+    };
+    const std::vector<uint8_t> sync_response{
+        103,
+        1,
+        7,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0xd2,
+        0x04,
+        56,
+        7,
+        8,
+        9,
+        26,
+    };
+    const std::vector<uint8_t> read_response{
+        103,
+        1,
+        5,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0x39,
+        0x30,
+        34,
+        12,
+        15,
+        5,
+        26,
+    };
+
+    uint32_t request_id = 99;
+    EXPECT_STATUS(clock_sync(nullptr, &sync_request, &request_id), IEC_STATUS_INVALID_ARGUMENT);
+    EXPECT_TRUE(request_id == 0);
+    EXPECT_STATUS(read_clock(nullptr, &read_request, &request_id), IEC_STATUS_INVALID_ARGUMENT);
+    EXPECT_TRUE(request_id == 0);
+    EXPECT_STATUS(create(&common, &protocol_config, &transport, &callbacks, &session), IEC_STATUS_OK);
+    EXPECT_TRUE(session != nullptr);
+
+    auto cleanup = [&] {
+        if (session != nullptr) {
+            (void)stop(session, 100);
+            (void)destroy(session);
+            session = nullptr;
+        }
+        close_transport(mock);
+    };
+
+    try {
+        request_id = 99;
+        EXPECT_STATUS(clock_sync(session, nullptr, &request_id), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_TRUE(request_id == 0);
+        EXPECT_STATUS(clock_sync(session, &sync_request, nullptr), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(clock_sync(session, &invalid_flag, &request_id), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(clock_sync(session, &invalid_sync, &request_id), IEC_STATUS_BAD_STATE);
+        EXPECT_STATUS(read_clock(session, nullptr, &request_id), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_TRUE(request_id == 0);
+        EXPECT_STATUS(read_clock(session, &read_request, nullptr), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(clock_sync(session, &sync_request, &request_id), IEC_STATUS_BAD_STATE);
+        EXPECT_TRUE(request_id == 0);
+        EXPECT_STATUS(read_clock(session, &read_request, &request_id), IEC_STATUS_BAD_STATE);
+        EXPECT_TRUE(request_id == 0);
+
+        EXPECT_STATUS(start(session), IEC_STATUS_OK);
+        EXPECT_TRUE(recorder.wait_until_contains(IEC_RUNTIME_RUNNING));
+        EXPECT_STATUS(clock_sync(session, &invalid_sync, &request_id), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(clock_sync(session, &sync_request, &request_id), IEC_STATUS_OK);
+        EXPECT_TRUE(request_id == 1);
+        EXPECT_TRUE(mock.send_count == 1);
+        EXPECT_TRUE(mock.last_sent == expected_sync_request);
+
+        EXPECT_STATUS(read_clock(session, &read_request, &request_id), IEC_STATUS_OK);
+        EXPECT_TRUE(request_id == 2);
+        EXPECT_TRUE(mock.send_count == 2);
+        EXPECT_TRUE(mock.last_sent == expected_read_request);
+
+        push_recv(mock, sync_response);
+        EXPECT_TRUE(recorder.wait_until_clock_count(1));
+        push_recv(mock, read_response);
+        EXPECT_TRUE(recorder.wait_until_clock_count(2));
+
+        const auto clocks = recorder.clock_snapshot();
+        EXPECT_TRUE(clocks.size() == 2);
+        EXPECT_TRUE(clocks[0].result.request_id == 1);
+        EXPECT_TRUE(clocks[0].result.operation == IEC_CLOCK_OPERATION_SYNC);
+        EXPECT_TRUE(clocks[0].result.result == IEC_CLOCK_RESULT_ACCEPTED);
+        EXPECT_TRUE(clocks[0].result.common_address == 1);
+        EXPECT_TRUE(clocks[0].result.has_timestamp == 0);
+        EXPECT_TRUE(clocks[0].result.cause_of_transmission == 7);
+        EXPECT_TRUE(clocks[1].result.request_id == 2);
+        EXPECT_TRUE(clocks[1].result.operation == IEC_CLOCK_OPERATION_READ);
+        EXPECT_TRUE(clocks[1].result.result == IEC_CLOCK_RESULT_ACCEPTED);
+        EXPECT_TRUE(clocks[1].result.common_address == 1);
+        EXPECT_TRUE(clocks[1].result.has_timestamp == 1);
+        EXPECT_TRUE(clocks[1].result.timestamp.msec == 12345);
+        EXPECT_TRUE(clocks[1].result.timestamp.minute == 34);
+        EXPECT_TRUE(clocks[1].result.timestamp.hour == 12);
+        EXPECT_TRUE(clocks[1].result.timestamp.day == 15);
+        EXPECT_TRUE(clocks[1].result.timestamp.month == 5);
+        EXPECT_TRUE(clocks[1].result.timestamp.year == 26);
+        EXPECT_TRUE(clocks[1].result.timestamp.invalid == 0);
+        EXPECT_TRUE(clocks[1].result.cause_of_transmission == 5);
+
+        EXPECT_STATUS(stop(session, 1000), IEC_STATUS_OK);
+        EXPECT_STATUS(destroy(session), IEC_STATUS_OK);
+        session = nullptr;
+        close_transport(mock);
+    } catch (...) {
+        cleanup();
+        throw;
+    }
+
+    std::printf("  %s clock\n", name);
+}
+
 void test_iec101_validate_config()
 {
     auto valid = make_iec101_config();
@@ -1269,6 +1500,30 @@ void test_iec101_read_point()
         [](iec_session_t *session, uint32_t timeout_ms) { return iec101_stop(session, timeout_ms); },
         [](iec_session_t *session, const iec_point_address_t *address) {
             return iec101_read_point(session, address);
+        });
+}
+
+void test_iec101_clock()
+{
+    const auto valid = make_iec101_config();
+    exercise_clock(
+        "iec101",
+        valid,
+        [](const iec_session_config_t *common,
+           const iec101_master_config_t *config,
+           const iec_transport_t *transport,
+           const iec_callbacks_t *callbacks,
+           iec_session_t **out_session) {
+            return iec101_create(common, config, transport, callbacks, out_session);
+        },
+        [](iec_session_t *session) { return iec101_destroy(session); },
+        [](iec_session_t *session) { return iec101_start(session); },
+        [](iec_session_t *session, uint32_t timeout_ms) { return iec101_stop(session, timeout_ms); },
+        [](iec_session_t *session, const iec_clock_sync_request_t *request, uint32_t *out_request_id) {
+            return iec101_clock_sync(session, request, out_request_id);
+        },
+        [](iec_session_t *session, const iec_clock_read_request_t *request, uint32_t *out_request_id) {
+            return iec101_read_clock(session, request, out_request_id);
         });
 }
 
@@ -1417,6 +1672,30 @@ void test_m101_read_point()
         });
 }
 
+void test_m101_clock()
+{
+    const auto valid = make_m101_config();
+    exercise_clock(
+        "m101",
+        valid,
+        [](const iec_session_config_t *common,
+           const m101_master_config_t *config,
+           const iec_transport_t *transport,
+           const iec_callbacks_t *callbacks,
+           iec_session_t **out_session) {
+            return m101_create(common, config, transport, callbacks, out_session);
+        },
+        [](iec_session_t *session) { return m101_destroy(session); },
+        [](iec_session_t *session) { return m101_start(session); },
+        [](iec_session_t *session, uint32_t timeout_ms) { return m101_stop(session, timeout_ms); },
+        [](iec_session_t *session, const iec_clock_sync_request_t *request, uint32_t *out_request_id) {
+            return m101_clock_sync(session, request, out_request_id);
+        },
+        [](iec_session_t *session, const iec_clock_read_request_t *request, uint32_t *out_request_id) {
+            return m101_read_clock(session, request, out_request_id);
+        });
+}
+
 void test_iec104_validate_config()
 {
     auto valid = make_iec104_config();
@@ -1562,6 +1841,30 @@ void test_iec104_read_point()
         });
 }
 
+void test_iec104_clock()
+{
+    const auto valid = make_iec104_config();
+    exercise_clock(
+        "iec104",
+        valid,
+        [](const iec_session_config_t *common,
+           const iec104_master_config_t *config,
+           const iec_transport_t *transport,
+           const iec_callbacks_t *callbacks,
+           iec_session_t **out_session) {
+            return iec104_create(common, config, transport, callbacks, out_session);
+        },
+        [](iec_session_t *session) { return iec104_destroy(session); },
+        [](iec_session_t *session) { return iec104_start(session); },
+        [](iec_session_t *session, uint32_t timeout_ms) { return iec104_stop(session, timeout_ms); },
+        [](iec_session_t *session, const iec_clock_sync_request_t *request, uint32_t *out_request_id) {
+            return iec104_clock_sync(session, request, out_request_id);
+        },
+        [](iec_session_t *session, const iec_clock_read_request_t *request, uint32_t *out_request_id) {
+            return iec104_read_clock(session, request, out_request_id);
+        });
+}
+
 struct TestCase {
     const char *name;
     void (*run)();
@@ -1588,6 +1891,7 @@ int gw_protocol_run_lifecycle_tests(const char *filter)
         {"m101.counter_interrogation", test_m101_counter_interrogation},
         {"m101.control_point", test_m101_control_point},
         {"m101.read_point", test_m101_read_point},
+        {"m101.clock", test_m101_clock},
         {"iec101.validate_config", test_iec101_validate_config},
         {"iec101.lifecycle", test_iec101_lifecycle},
         {"iec101.raw_asdu", test_iec101_raw_asdu},
@@ -1595,6 +1899,7 @@ int gw_protocol_run_lifecycle_tests(const char *filter)
         {"iec101.counter_interrogation", test_iec101_counter_interrogation},
         {"iec101.control_point", test_iec101_control_point},
         {"iec101.read_point", test_iec101_read_point},
+        {"iec101.clock", test_iec101_clock},
         {"iec104.validate_config", test_iec104_validate_config},
         {"iec104.lifecycle", test_iec104_lifecycle},
         {"iec104.raw_asdu", test_iec104_raw_asdu},
@@ -1602,6 +1907,7 @@ int gw_protocol_run_lifecycle_tests(const char *filter)
         {"iec104.counter_interrogation", test_iec104_counter_interrogation},
         {"iec104.control_point", test_iec104_control_point},
         {"iec104.read_point", test_iec104_read_point},
+        {"iec104.clock", test_iec104_clock},
     };
 
     int failures = 0;

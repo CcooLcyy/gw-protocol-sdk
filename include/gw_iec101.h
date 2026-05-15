@@ -164,6 +164,42 @@ typedef struct iec_counter_interrogation_request {
     uint8_t freeze;
 } iec_counter_interrogation_request_t;
 
+typedef struct iec_clock_sync_request {
+    uint16_t common_address;
+    uint8_t use_current_system_time;
+    iec_timestamp_t timestamp;
+} iec_clock_sync_request_t;
+
+typedef struct iec_clock_read_request {
+    uint16_t common_address;
+} iec_clock_read_request_t;
+
+typedef enum iec_clock_operation {
+    IEC_CLOCK_OPERATION_SYNC = 1,
+    IEC_CLOCK_OPERATION_READ = 2
+} iec_clock_operation_t;
+
+typedef enum iec_clock_result_code {
+    IEC_CLOCK_RESULT_ACCEPTED = 1,
+    IEC_CLOCK_RESULT_REJECTED = 2,
+    IEC_CLOCK_RESULT_TIMEOUT = 3,
+    IEC_CLOCK_RESULT_NEGATIVE_CONFIRM = 4,
+    IEC_CLOCK_RESULT_PROTOCOL_ERROR = 5,
+    IEC_CLOCK_RESULT_UNSUPPORTED = 6
+} iec_clock_result_code_t;
+
+typedef struct iec_clock_result {
+    uint32_t request_id;
+    iec_clock_operation_t operation;
+    iec_clock_result_code_t result;
+    uint16_t common_address;
+    uint8_t has_timestamp;
+    iec_timestamp_t timestamp;
+    uint8_t cause_of_transmission;
+    int32_t native_error_code;
+    const char *detail_message;
+} iec_clock_result_t;
+
 typedef enum iec_raw_asdu_direction {
     IEC_RAW_ASDU_RX = 1,
     IEC_RAW_ASDU_TX = 2
@@ -253,11 +289,17 @@ typedef void(GW_PROTOCOL_CALL *iec_on_raw_asdu_fn)(
     const iec_raw_asdu_event_t *event,
     void *user_context);
 
+typedef void(GW_PROTOCOL_CALL *iec_on_clock_result_fn)(
+    iec_session_t *session,
+    const iec_clock_result_t *result,
+    void *user_context);
+
 typedef struct iec_callbacks {
     iec_on_session_state_fn on_session_state;
     iec_on_point_indication_fn on_point_indication;
     iec_on_command_result_fn on_command_result;
     iec_on_raw_asdu_fn on_raw_asdu;
+    iec_on_clock_result_fn on_clock_result;
 } iec_callbacks_t;
 
 #ifdef __cplusplus
@@ -325,6 +367,14 @@ GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL iec101_control_point(
 GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL iec101_read_point(
     iec_session_t *session,
     const iec_point_address_t *address);
+GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL iec101_clock_sync(
+    iec_session_t *session,
+    const iec_clock_sync_request_t *request,
+    uint32_t *out_request_id);
+GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL iec101_read_clock(
+    iec_session_t *session,
+    const iec_clock_read_request_t *request,
+    uint32_t *out_request_id);
 GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL iec101_set_option(
     iec_session_t *session,
     iec_option_t option,
