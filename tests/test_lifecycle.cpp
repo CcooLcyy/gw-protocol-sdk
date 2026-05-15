@@ -232,6 +232,19 @@ struct StateRecorder {
 
     std::vector<ClockEvent> clock_events;
 
+    struct ParameterIndicationEvent {
+        iec_parameter_indication_t indication{};
+        std::string value_text;
+    };
+
+    std::vector<ParameterIndicationEvent> parameter_indications;
+
+    struct ParameterResultEvent {
+        iec_parameter_result_t result{};
+    };
+
+    std::vector<ParameterResultEvent> parameter_results;
+
     void record(iec_runtime_state_t state)
     {
         {
@@ -246,6 +259,32 @@ struct StateRecorder {
         {
             std::lock_guard<std::mutex> lock(mutex);
             clock_events.push_back(ClockEvent{result});
+        }
+        cv.notify_all();
+    }
+
+    void record_parameter_indication(const iec_parameter_indication_t &indication)
+    {
+        ParameterIndicationEvent snapshot{};
+        snapshot.indication = indication;
+        if (indication.item.value_type == IEC_PARAMETER_VALUE_STRING &&
+            indication.item.value.string_value != nullptr) {
+            snapshot.value_text = indication.item.value.string_value;
+            snapshot.indication.item.value.string_value = snapshot.value_text.c_str();
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            parameter_indications.push_back(std::move(snapshot));
+        }
+        cv.notify_all();
+    }
+
+    void record_parameter_result(const iec_parameter_result_t &result)
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            parameter_results.push_back(ParameterResultEvent{result});
         }
         cv.notify_all();
     }
@@ -318,6 +357,18 @@ struct StateRecorder {
         return clock_events;
     }
 
+    std::vector<ParameterIndicationEvent> parameter_indication_snapshot() const
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        return parameter_indications;
+    }
+
+    std::vector<ParameterResultEvent> parameter_result_snapshot() const
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        return parameter_results;
+    }
+
     bool wait_until_contains(iec_runtime_state_t state)
     {
         std::unique_lock<std::mutex> lock(mutex);
@@ -347,6 +398,22 @@ struct StateRecorder {
         std::unique_lock<std::mutex> lock(mutex);
         return cv.wait_for(lock, kStateWaitTimeout, [&] {
             return clock_events.size() >= count;
+        });
+    }
+
+    bool wait_until_parameter_indication_count(std::size_t count)
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        return cv.wait_for(lock, kStateWaitTimeout, [&] {
+            return parameter_indications.size() >= count;
+        });
+    }
+
+    bool wait_until_parameter_result_count(std::size_t count)
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        return cv.wait_for(lock, kStateWaitTimeout, [&] {
+            return parameter_results.size() >= count;
         });
     }
 };
@@ -405,6 +472,29 @@ void on_clock_result(iec_session_t *session, const iec_clock_result_t *result, v
     recorder->record_clock(*result);
 }
 
+void on_parameter_indication(
+    iec_session_t *session,
+    const iec_parameter_indication_t *indication,
+    void *user_context)
+{
+    (void)session;
+    auto *recorder = static_cast<StateRecorder *>(user_context);
+    if (recorder == nullptr || indication == nullptr) {
+        return;
+    }
+    recorder->record_parameter_indication(*indication);
+}
+
+void on_parameter_result(iec_session_t *session, const iec_parameter_result_t *result, void *user_context)
+{
+    (void)session;
+    auto *recorder = static_cast<StateRecorder *>(user_context);
+    if (recorder == nullptr || result == nullptr) {
+        return;
+    }
+    recorder->record_parameter_result(*result);
+}
+
 iec_session_config_t make_common_config(StateRecorder &recorder)
 {
     iec_session_config_t config{};
@@ -437,6 +527,8 @@ iec_callbacks_t make_callbacks()
     callbacks.on_command_result = on_command_result;
     callbacks.on_raw_asdu = on_raw_asdu;
     callbacks.on_clock_result = on_clock_result;
+    callbacks.on_parameter_indication = on_parameter_indication;
+    callbacks.on_parameter_result = on_parameter_result;
     return callbacks;
 }
 
@@ -1358,6 +1450,228 @@ void exercise_clock(
     std::printf("  %s clock\n", name);
 }
 
+template <
+    typename Config,
+    typename CreateFn,
+    typename DestroyFn,
+    typename StartFn,
+    typename StopFn,
+    typename ReadParametersFn,
+    typename WriteParametersFn,
+    typename VerifyParametersFn,
+    typename SwitchSettingGroupFn>
+void exercise_parameters(
+    const char *name,
+    const Config &protocol_config,
+    CreateFn create,
+    DestroyFn destroy,
+    StartFn start,
+    StopFn stop,
+    ReadParametersFn read_parameters,
+    WriteParametersFn write_parameters,
+    VerifyParametersFn verify_parameters,
+    SwitchSettingGroupFn switch_setting_group)
+{
+    StateRecorder recorder;
+    MockTransport mock;
+    auto common = make_common_config(recorder);
+    auto transport = make_transport(mock);
+    auto callbacks = make_callbacks();
+
+    iec_session_t *session = nullptr;
+    iec_parameter_read_request_t read_request{};
+    read_request.common_address = 1;
+    read_request.read_mode = IEC_PARAMETER_READ_BY_ADDRESS_RANGE;
+    read_request.scope = IEC_PARAMETER_SCOPE_RUNNING;
+    read_request.start_address = 0x1000;
+    read_request.end_address = 0x1001;
+    read_request.setting_group = 2;
+    read_request.include_descriptor = 1;
+
+    iec_parameter_item_t write_items[2]{};
+    write_items[0].parameter_id = 10;
+    write_items[0].address = 0x1000;
+    write_items[0].scope = IEC_PARAMETER_SCOPE_RUNNING;
+    write_items[0].value_type = IEC_PARAMETER_VALUE_UINT;
+    write_items[0].value.uint_value = 1234;
+    write_items[1].parameter_id = 11;
+    write_items[1].address = 0x1001;
+    write_items[1].scope = IEC_PARAMETER_SCOPE_RUNNING;
+    write_items[1].value_type = IEC_PARAMETER_VALUE_BOOL;
+    write_items[1].value.bool_value = 1;
+
+    iec_parameter_write_request_t write_request{};
+    write_request.common_address = 1;
+    write_request.setting_group = 2;
+    write_request.items = write_items;
+    write_request.item_count = 2;
+    write_request.verify_after_write = 1;
+
+    iec_parameter_verify_request_t verify_request{};
+    verify_request.common_address = 1;
+    verify_request.setting_group = 2;
+    verify_request.expected_items = write_items;
+    verify_request.item_count = 2;
+
+    iec_setting_group_request_t get_group{};
+    get_group.common_address = 1;
+    get_group.action = IEC_SETTING_GROUP_ACTION_GET_CURRENT;
+    get_group.target_group = 0;
+
+    iec_setting_group_request_t switch_group{};
+    switch_group.common_address = 1;
+    switch_group.action = IEC_SETTING_GROUP_ACTION_SWITCH;
+    switch_group.target_group = 3;
+
+    const std::vector<uint8_t> expected_read_request{
+        202, 1, 5, 0, 1, 0, 0, 0, 0, 2, 2, 4, 2, 0x00, 0x10, 0, 0, 0x01, 0x10, 0, 0, 0,
+    };
+    const std::vector<uint8_t> expected_write_request{
+        203, 1, 6, 0, 1, 0, 0, 0, 0, 2, 2, 2,
+        10, 0, 0, 0, 0x00, 0x10, 0, 0, 2, 3, 4, 0xd2, 0x04, 0, 0,
+        11, 0, 0, 0, 0x01, 0x10, 0, 0, 2, 1, 1, 1,
+    };
+    const std::vector<uint8_t> expected_verify_request{
+        204, 1, 6, 0, 1, 0, 0, 0, 0, 2, 0, 2,
+        10, 0, 0, 0, 0x00, 0x10, 0, 0, 2, 3, 4, 0xd2, 0x04, 0, 0,
+        11, 0, 0, 0, 0x01, 0x10, 0, 0, 2, 1, 1, 1,
+    };
+    const std::vector<uint8_t> expected_get_group_request{
+        205, 1, 6, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0,
+    };
+    const std::vector<uint8_t> expected_switch_group_request{
+        205, 1, 6, 0, 1, 0, 0, 0, 0, 3, 0, 2, 3,
+    };
+    const std::vector<uint8_t> read_response{
+        202, 1, 10, 0, 1, 0, 0, 0, 0, 2, 3,
+        10, 0, 0, 0, 0x00, 0x10, 0, 0, 2, 3, 4, 0xd2, 0x04, 0, 0,
+    };
+    const std::vector<uint8_t> write_response{
+        203, 1, 7, 0, 1, 0, 0, 0, 0, 2, 1, 10, 0, 0, 0, 0x00, 0x10, 0, 0,
+    };
+    const std::vector<uint8_t> verify_response{
+        204, 1, 7, 0, 1, 0, 0, 0, 0, 2, 1, 10, 0, 0, 0, 0x00, 0x10, 0, 0,
+    };
+    const std::vector<uint8_t> current_group_response{
+        205, 1, 5, 0, 1, 0, 0, 0, 0, 2, 1,
+    };
+    const std::vector<uint8_t> switch_group_response{
+        205, 1, 7, 0, 1, 0, 0, 0, 0, 3, 1,
+    };
+
+    uint32_t request_id = 99;
+    EXPECT_STATUS(read_parameters(nullptr, &read_request, &request_id), IEC_STATUS_INVALID_ARGUMENT);
+    EXPECT_TRUE(request_id == 0);
+    EXPECT_STATUS(create(&common, &protocol_config, &transport, &callbacks, &session), IEC_STATUS_OK);
+    EXPECT_TRUE(session != nullptr);
+
+    auto cleanup = [&] {
+        if (session != nullptr) {
+            (void)stop(session, 100);
+            (void)destroy(session);
+            session = nullptr;
+        }
+        close_transport(mock);
+    };
+
+    try {
+        auto invalid_read = read_request;
+        invalid_read.start_address = 2;
+        invalid_read.end_address = 1;
+        auto invalid_write = write_request;
+        invalid_write.verify_after_write = 2;
+        auto invalid_item = write_items[0];
+        invalid_item.value_type = IEC_PARAMETER_VALUE_STRING;
+        invalid_item.value.string_value = nullptr;
+        iec_parameter_write_request_t invalid_items_request = write_request;
+        invalid_items_request.items = &invalid_item;
+        invalid_items_request.item_count = 1;
+        auto invalid_switch = switch_group;
+        invalid_switch.target_group = 0;
+
+        EXPECT_STATUS(read_parameters(session, nullptr, &request_id), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(read_parameters(session, &invalid_read, &request_id), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(write_parameters(session, &invalid_write, &request_id), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(write_parameters(session, &invalid_items_request, &request_id), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(verify_parameters(session, nullptr, &request_id), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(switch_setting_group(session, &invalid_switch, &request_id), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(read_parameters(session, &read_request, &request_id), IEC_STATUS_BAD_STATE);
+        EXPECT_TRUE(request_id == 0);
+
+        EXPECT_STATUS(start(session), IEC_STATUS_OK);
+        EXPECT_TRUE(recorder.wait_until_contains(IEC_RUNTIME_RUNNING));
+
+        EXPECT_STATUS(read_parameters(session, &read_request, &request_id), IEC_STATUS_OK);
+        EXPECT_TRUE(request_id == 1);
+        EXPECT_TRUE(mock.last_sent == expected_read_request);
+        push_recv(mock, read_response);
+        EXPECT_TRUE(recorder.wait_until_parameter_indication_count(1));
+        const auto indications = recorder.parameter_indication_snapshot();
+        EXPECT_TRUE(indications.size() == 1);
+        EXPECT_TRUE(indications[0].indication.request_id == 1);
+        EXPECT_TRUE(indications[0].indication.operation == IEC_PARAMETER_OPERATION_READ);
+        EXPECT_TRUE(indications[0].indication.setting_group == 2);
+        EXPECT_TRUE(indications[0].indication.is_final == 1);
+        EXPECT_TRUE(indications[0].indication.has_descriptor == 1);
+        EXPECT_TRUE(indications[0].indication.item.parameter_id == 10);
+        EXPECT_TRUE(indications[0].indication.item.address == 0x1000);
+        EXPECT_TRUE(indications[0].indication.item.value_type == IEC_PARAMETER_VALUE_UINT);
+        EXPECT_TRUE(indications[0].indication.item.value.uint_value == 1234);
+
+        EXPECT_STATUS(write_parameters(session, &write_request, &request_id), IEC_STATUS_OK);
+        EXPECT_TRUE(request_id == 2);
+        EXPECT_TRUE(mock.last_sent == expected_write_request);
+        push_recv(mock, write_response);
+        EXPECT_TRUE(recorder.wait_until_parameter_result_count(1));
+
+        EXPECT_STATUS(verify_parameters(session, &verify_request, &request_id), IEC_STATUS_OK);
+        EXPECT_TRUE(request_id == 3);
+        EXPECT_TRUE(mock.last_sent == expected_verify_request);
+        push_recv(mock, verify_response);
+        EXPECT_TRUE(recorder.wait_until_parameter_result_count(2));
+
+        EXPECT_STATUS(switch_setting_group(session, &get_group, &request_id), IEC_STATUS_OK);
+        EXPECT_TRUE(request_id == 4);
+        EXPECT_TRUE(mock.last_sent == expected_get_group_request);
+        push_recv(mock, current_group_response);
+        EXPECT_TRUE(recorder.wait_until_parameter_result_count(3));
+
+        EXPECT_STATUS(switch_setting_group(session, &switch_group, &request_id), IEC_STATUS_OK);
+        EXPECT_TRUE(request_id == 5);
+        EXPECT_TRUE(mock.last_sent == expected_switch_group_request);
+        push_recv(mock, switch_group_response);
+        EXPECT_TRUE(recorder.wait_until_parameter_result_count(4));
+
+        const auto results = recorder.parameter_result_snapshot();
+        EXPECT_TRUE(results.size() == 4);
+        EXPECT_TRUE(results[0].result.request_id == 2);
+        EXPECT_TRUE(results[0].result.operation == IEC_PARAMETER_OPERATION_WRITE);
+        EXPECT_TRUE(results[0].result.result == IEC_PARAMETER_RESULT_ACCEPTED);
+        EXPECT_TRUE(results[0].result.parameter_id == 10);
+        EXPECT_TRUE(results[1].result.request_id == 3);
+        EXPECT_TRUE(results[1].result.operation == IEC_PARAMETER_OPERATION_VERIFY);
+        EXPECT_TRUE(results[1].result.result == IEC_PARAMETER_RESULT_VERIFY_OK);
+        EXPECT_TRUE(results[2].result.request_id == 4);
+        EXPECT_TRUE(results[2].result.operation == IEC_PARAMETER_OPERATION_SWITCH_GROUP);
+        EXPECT_TRUE(results[2].result.result == IEC_PARAMETER_RESULT_CURRENT_GROUP);
+        EXPECT_TRUE(results[2].result.setting_group == 2);
+        EXPECT_TRUE(results[3].result.request_id == 5);
+        EXPECT_TRUE(results[3].result.operation == IEC_PARAMETER_OPERATION_SWITCH_GROUP);
+        EXPECT_TRUE(results[3].result.result == IEC_PARAMETER_RESULT_GROUP_SWITCHED);
+        EXPECT_TRUE(results[3].result.setting_group == 3);
+
+        EXPECT_STATUS(stop(session, 1000), IEC_STATUS_OK);
+        EXPECT_STATUS(destroy(session), IEC_STATUS_OK);
+        session = nullptr;
+        close_transport(mock);
+    } catch (...) {
+        cleanup();
+        throw;
+    }
+
+    std::printf("  %s parameters\n", name);
+}
+
 void test_iec101_validate_config()
 {
     auto valid = make_iec101_config();
@@ -1524,6 +1838,36 @@ void test_iec101_clock()
         },
         [](iec_session_t *session, const iec_clock_read_request_t *request, uint32_t *out_request_id) {
             return iec101_read_clock(session, request, out_request_id);
+        });
+}
+
+void test_iec101_parameters()
+{
+    const auto valid = make_iec101_config();
+    exercise_parameters(
+        "iec101",
+        valid,
+        [](const iec_session_config_t *common,
+           const iec101_master_config_t *config,
+           const iec_transport_t *transport,
+           const iec_callbacks_t *callbacks,
+           iec_session_t **out_session) {
+            return iec101_create(common, config, transport, callbacks, out_session);
+        },
+        [](iec_session_t *session) { return iec101_destroy(session); },
+        [](iec_session_t *session) { return iec101_start(session); },
+        [](iec_session_t *session, uint32_t timeout_ms) { return iec101_stop(session, timeout_ms); },
+        [](iec_session_t *session, const iec_parameter_read_request_t *request, uint32_t *out_request_id) {
+            return iec101_read_parameters(session, request, out_request_id);
+        },
+        [](iec_session_t *session, const iec_parameter_write_request_t *request, uint32_t *out_request_id) {
+            return iec101_write_parameters(session, request, out_request_id);
+        },
+        [](iec_session_t *session, const iec_parameter_verify_request_t *request, uint32_t *out_request_id) {
+            return iec101_verify_parameters(session, request, out_request_id);
+        },
+        [](iec_session_t *session, const iec_setting_group_request_t *request, uint32_t *out_request_id) {
+            return iec101_switch_setting_group(session, request, out_request_id);
         });
 }
 
@@ -1696,6 +2040,36 @@ void test_m101_clock()
         });
 }
 
+void test_m101_parameters()
+{
+    const auto valid = make_m101_config();
+    exercise_parameters(
+        "m101",
+        valid,
+        [](const iec_session_config_t *common,
+           const m101_master_config_t *config,
+           const iec_transport_t *transport,
+           const iec_callbacks_t *callbacks,
+           iec_session_t **out_session) {
+            return m101_create(common, config, transport, callbacks, out_session);
+        },
+        [](iec_session_t *session) { return m101_destroy(session); },
+        [](iec_session_t *session) { return m101_start(session); },
+        [](iec_session_t *session, uint32_t timeout_ms) { return m101_stop(session, timeout_ms); },
+        [](iec_session_t *session, const iec_parameter_read_request_t *request, uint32_t *out_request_id) {
+            return m101_read_parameters(session, request, out_request_id);
+        },
+        [](iec_session_t *session, const iec_parameter_write_request_t *request, uint32_t *out_request_id) {
+            return m101_write_parameters(session, request, out_request_id);
+        },
+        [](iec_session_t *session, const iec_parameter_verify_request_t *request, uint32_t *out_request_id) {
+            return m101_verify_parameters(session, request, out_request_id);
+        },
+        [](iec_session_t *session, const iec_setting_group_request_t *request, uint32_t *out_request_id) {
+            return m101_switch_setting_group(session, request, out_request_id);
+        });
+}
+
 void test_iec104_validate_config()
 {
     auto valid = make_iec104_config();
@@ -1865,6 +2239,36 @@ void test_iec104_clock()
         });
 }
 
+void test_iec104_parameters()
+{
+    const auto valid = make_iec104_config();
+    exercise_parameters(
+        "iec104",
+        valid,
+        [](const iec_session_config_t *common,
+           const iec104_master_config_t *config,
+           const iec_transport_t *transport,
+           const iec_callbacks_t *callbacks,
+           iec_session_t **out_session) {
+            return iec104_create(common, config, transport, callbacks, out_session);
+        },
+        [](iec_session_t *session) { return iec104_destroy(session); },
+        [](iec_session_t *session) { return iec104_start(session); },
+        [](iec_session_t *session, uint32_t timeout_ms) { return iec104_stop(session, timeout_ms); },
+        [](iec_session_t *session, const iec_parameter_read_request_t *request, uint32_t *out_request_id) {
+            return iec104_read_parameters(session, request, out_request_id);
+        },
+        [](iec_session_t *session, const iec_parameter_write_request_t *request, uint32_t *out_request_id) {
+            return iec104_write_parameters(session, request, out_request_id);
+        },
+        [](iec_session_t *session, const iec_parameter_verify_request_t *request, uint32_t *out_request_id) {
+            return iec104_verify_parameters(session, request, out_request_id);
+        },
+        [](iec_session_t *session, const iec_setting_group_request_t *request, uint32_t *out_request_id) {
+            return iec104_switch_setting_group(session, request, out_request_id);
+        });
+}
+
 struct TestCase {
     const char *name;
     void (*run)();
@@ -1892,6 +2296,7 @@ int gw_protocol_run_lifecycle_tests(const char *filter)
         {"m101.control_point", test_m101_control_point},
         {"m101.read_point", test_m101_read_point},
         {"m101.clock", test_m101_clock},
+        {"m101.parameters", test_m101_parameters},
         {"iec101.validate_config", test_iec101_validate_config},
         {"iec101.lifecycle", test_iec101_lifecycle},
         {"iec101.raw_asdu", test_iec101_raw_asdu},
@@ -1900,6 +2305,7 @@ int gw_protocol_run_lifecycle_tests(const char *filter)
         {"iec101.control_point", test_iec101_control_point},
         {"iec101.read_point", test_iec101_read_point},
         {"iec101.clock", test_iec101_clock},
+        {"iec101.parameters", test_iec101_parameters},
         {"iec104.validate_config", test_iec104_validate_config},
         {"iec104.lifecycle", test_iec104_lifecycle},
         {"iec104.raw_asdu", test_iec104_raw_asdu},
@@ -1908,6 +2314,7 @@ int gw_protocol_run_lifecycle_tests(const char *filter)
         {"iec104.control_point", test_iec104_control_point},
         {"iec104.read_point", test_iec104_read_point},
         {"iec104.clock", test_iec104_clock},
+        {"iec104.parameters", test_iec104_parameters},
     };
 
     int failures = 0;

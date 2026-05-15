@@ -7,6 +7,7 @@
 #include <ctime>
 #include <mutex>
 #include <new>
+#include <string>
 #include <thread>
 #include <variant>
 #include <vector>
@@ -24,6 +25,13 @@ struct iec_session {
         uint16_t common_address = 0;
     };
 
+    struct PendingParameter {
+        uint32_t request_id = 0;
+        iec_parameter_operation_t operation = IEC_PARAMETER_OPERATION_READ;
+        uint16_t common_address = 0;
+        uint8_t setting_group = 0;
+    };
+
     gw::protocol::Profile profile;
     iec_session_config_t config;
     iec_transport_t transport;
@@ -33,6 +41,7 @@ struct iec_session {
     std::thread worker;
     std::vector<PendingCommand> pending_commands;
     std::vector<PendingClock> pending_clocks;
+    std::vector<PendingParameter> pending_parameters;
     bool stop_requested = false;
     iec_runtime_state_t state = IEC_RUNTIME_CREATED;
     uint32_t next_command_id = 1;
@@ -71,9 +80,14 @@ constexpr uint8_t kAsduTypeGeneralInterrogation = 100;
 constexpr uint8_t kAsduTypeCounterInterrogation = 101;
 constexpr uint8_t kAsduTypeReadCommand = 102;
 constexpr uint8_t kAsduTypeClockSync = 103;
+constexpr uint8_t kAsduTypeParameterRead = 202;
+constexpr uint8_t kAsduTypeParameterWrite = 203;
+constexpr uint8_t kAsduTypeParameterVerify = 204;
+constexpr uint8_t kAsduTypeSettingGroup = 205;
 constexpr uint8_t kCauseRequest = 5;
 constexpr uint8_t kCauseActivation = 6;
 constexpr uint8_t kCauseActivationConfirm = 7;
+constexpr uint8_t kCauseActivationTermination = 10;
 constexpr uint8_t kDefaultOriginatorAddress = 0;
 constexpr uint8_t kGeneralInterrogationMinQualifier = 20;
 constexpr uint8_t kGeneralInterrogationMaxQualifier = 36;
@@ -82,6 +96,9 @@ constexpr uint8_t kCounterInterrogationMaxQualifier = 5;
 constexpr uint8_t kCounterInterrogationMaxFreeze = 3;
 constexpr uint8_t kSelectExecuteQualifierMask = 0x80;
 constexpr uint32_t kClockSyncInformationObjectAddress = 0;
+constexpr uint32_t kParameterChannelInformationObjectAddress = 0;
+constexpr uint32_t kMaxParameterItemsPerRequest = 32;
+constexpr uint32_t kMaxParameterStringBytes = 64;
 
 bool is_link_mode_valid(iec101_link_mode_t mode) noexcept
 {
@@ -218,6 +235,114 @@ bool is_command_value_valid(const iec_command_request_t &request) noexcept
     }
 }
 
+bool is_parameter_scope_valid(iec_parameter_scope_t scope) noexcept
+{
+    switch (scope) {
+    case IEC_PARAMETER_SCOPE_ALL:
+    case IEC_PARAMETER_SCOPE_FIXED:
+    case IEC_PARAMETER_SCOPE_RUNNING:
+    case IEC_PARAMETER_SCOPE_ACTION:
+    case IEC_PARAMETER_SCOPE_WIRELESS:
+    case IEC_PARAMETER_SCOPE_POWER:
+    case IEC_PARAMETER_SCOPE_LINE_LOSS:
+    case IEC_PARAMETER_SCOPE_POINT_TABLE:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool is_parameter_value_type_valid(iec_parameter_value_type_t type) noexcept
+{
+    switch (type) {
+    case IEC_PARAMETER_VALUE_BOOL:
+    case IEC_PARAMETER_VALUE_INT:
+    case IEC_PARAMETER_VALUE_UINT:
+    case IEC_PARAMETER_VALUE_FLOAT:
+    case IEC_PARAMETER_VALUE_ENUM:
+    case IEC_PARAMETER_VALUE_STRING:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool is_parameter_read_mode_valid(iec_parameter_read_mode_t mode) noexcept
+{
+    switch (mode) {
+    case IEC_PARAMETER_READ_ALL:
+    case IEC_PARAMETER_READ_BY_SCOPE:
+    case IEC_PARAMETER_READ_BY_GROUP:
+    case IEC_PARAMETER_READ_BY_ADDRESS_RANGE:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool is_setting_group_action_valid(iec_setting_group_action_t action) noexcept
+{
+    switch (action) {
+    case IEC_SETTING_GROUP_ACTION_GET_CURRENT:
+    case IEC_SETTING_GROUP_ACTION_SWITCH:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool is_parameter_item_valid(const iec_parameter_item_t &item) noexcept
+{
+    if (!is_parameter_scope_valid(item.scope) || !is_parameter_value_type_valid(item.value_type)) {
+        return false;
+    }
+    switch (item.value_type) {
+    case IEC_PARAMETER_VALUE_BOOL:
+        return item.value.bool_value <= 1;
+    case IEC_PARAMETER_VALUE_STRING:
+        return item.value.string_value != nullptr &&
+            std::strlen(item.value.string_value) <= kMaxParameterStringBytes;
+    case IEC_PARAMETER_VALUE_INT:
+    case IEC_PARAMETER_VALUE_UINT:
+    case IEC_PARAMETER_VALUE_FLOAT:
+    case IEC_PARAMETER_VALUE_ENUM:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool validate_parameter_read_request(const iec_parameter_read_request_t &request) noexcept
+{
+    if (!is_parameter_read_mode_valid(request.read_mode) || !is_parameter_scope_valid(request.scope) ||
+        !is_binary_flag(request.include_descriptor)) {
+        return false;
+    }
+    if (request.read_mode == IEC_PARAMETER_READ_BY_GROUP &&
+        (request.group_name == nullptr || request.group_name[0] == '\0' ||
+            std::strlen(request.group_name) > kMaxParameterStringBytes)) {
+        return false;
+    }
+    if (request.read_mode == IEC_PARAMETER_READ_BY_ADDRESS_RANGE &&
+        request.start_address > request.end_address) {
+        return false;
+    }
+    return true;
+}
+
+bool validate_parameter_items(const iec_parameter_item_t *items, uint32_t item_count) noexcept
+{
+    if (items == nullptr || item_count == 0 || item_count > kMaxParameterItemsPerRequest) {
+        return false;
+    }
+    for (uint32_t i = 0; i < item_count; ++i) {
+        if (!is_parameter_item_valid(items[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
 AsduLayout get_asdu_layout(const iec_session_t &session) noexcept
 {
     switch (session.profile) {
@@ -282,6 +407,11 @@ void write_float_le(uint8_t *buffer, uint32_t &offset, float value) noexcept
     uint32_t raw = 0;
     std::memcpy(&raw, &value, sizeof(raw));
     write_uint_le(buffer, offset, raw, 4);
+}
+
+void write_int32_le(uint8_t *buffer, uint32_t &offset, int32_t value) noexcept
+{
+    write_uint_le(buffer, offset, static_cast<uint32_t>(value), 4);
 }
 
 bool write_cp56_time2a(uint8_t *buffer, uint32_t &offset, const iec_timestamp_t &timestamp) noexcept
@@ -578,6 +708,160 @@ bool append_command_value(const iec_command_request_t &request, uint8_t *frame, 
     }
 }
 
+bool append_parameter_value(
+    const iec_parameter_item_t &item,
+    uint8_t *frame,
+    uint32_t &frame_size,
+    uint32_t capacity) noexcept
+{
+    if (capacity < frame_size + 14) {
+        return false;
+    }
+
+    write_uint_le(frame, frame_size, item.parameter_id, 4);
+    write_uint_le(frame, frame_size, item.address, 4);
+    frame[frame_size++] = static_cast<uint8_t>(item.scope);
+    frame[frame_size++] = static_cast<uint8_t>(item.value_type);
+
+    switch (item.value_type) {
+    case IEC_PARAMETER_VALUE_BOOL:
+        frame[frame_size++] = 1;
+        frame[frame_size++] = item.value.bool_value;
+        return true;
+    case IEC_PARAMETER_VALUE_INT:
+        frame[frame_size++] = 4;
+        write_int32_le(frame, frame_size, item.value.int_value);
+        return true;
+    case IEC_PARAMETER_VALUE_UINT:
+        frame[frame_size++] = 4;
+        write_uint_le(frame, frame_size, item.value.uint_value, 4);
+        return true;
+    case IEC_PARAMETER_VALUE_FLOAT:
+        frame[frame_size++] = 4;
+        write_float_le(frame, frame_size, item.value.float_value);
+        return true;
+    case IEC_PARAMETER_VALUE_ENUM:
+        frame[frame_size++] = 4;
+        write_uint_le(frame, frame_size, item.value.enum_value, 4);
+        return true;
+    case IEC_PARAMETER_VALUE_STRING: {
+        const uint32_t length = static_cast<uint32_t>(std::strlen(item.value.string_value));
+        if (length > kMaxParameterStringBytes || length > 255 || capacity < frame_size + 1 + length) {
+            return false;
+        }
+        frame[frame_size++] = static_cast<uint8_t>(length);
+        std::memcpy(frame + frame_size, item.value.string_value, length);
+        frame_size += length;
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
+bool decode_parameter_value(
+    const uint8_t *payload,
+    uint32_t payload_size,
+    uint32_t &offset,
+    iec_parameter_item_t &out,
+    std::string *out_string) noexcept
+{
+    if (payload_size < offset + 11) {
+        return false;
+    }
+
+    out = iec_parameter_item_t{};
+    out.parameter_id = read_uint32_le(payload + offset, 4);
+    offset += 4;
+    out.address = read_uint32_le(payload + offset, 4);
+    offset += 4;
+    out.scope = static_cast<iec_parameter_scope_t>(payload[offset++]);
+    out.value_type = static_cast<iec_parameter_value_type_t>(payload[offset++]);
+    const uint8_t value_size = payload[offset++];
+
+    if (!is_parameter_scope_valid(out.scope) || !is_parameter_value_type_valid(out.value_type) ||
+        payload_size < offset + value_size) {
+        return false;
+    }
+
+    switch (out.value_type) {
+    case IEC_PARAMETER_VALUE_BOOL:
+        if (value_size != 1 || payload[offset] > 1) {
+            return false;
+        }
+        out.value.bool_value = payload[offset];
+        break;
+    case IEC_PARAMETER_VALUE_INT:
+        if (value_size != 4) {
+            return false;
+        }
+        out.value.int_value = read_int32_le(payload + offset);
+        break;
+    case IEC_PARAMETER_VALUE_UINT:
+        if (value_size != 4) {
+            return false;
+        }
+        out.value.uint_value = read_uint32_le(payload + offset, 4);
+        break;
+    case IEC_PARAMETER_VALUE_FLOAT:
+        if (value_size != 4) {
+            return false;
+        }
+        std::memcpy(&out.value.float_value, payload + offset, sizeof(float));
+        break;
+    case IEC_PARAMETER_VALUE_ENUM:
+        if (value_size != 4) {
+            return false;
+        }
+        out.value.enum_value = read_uint32_le(payload + offset, 4);
+        break;
+    case IEC_PARAMETER_VALUE_STRING:
+        if (out_string == nullptr) {
+            return false;
+        }
+        out_string->assign(reinterpret_cast<const char *>(payload + offset), value_size);
+        out.value.string_value = out_string->c_str();
+        break;
+    default:
+        return false;
+    }
+
+    offset += value_size;
+    return true;
+}
+
+uint8_t parameter_type_id(iec_parameter_operation_t operation) noexcept
+{
+    switch (operation) {
+    case IEC_PARAMETER_OPERATION_READ:
+        return kAsduTypeParameterRead;
+    case IEC_PARAMETER_OPERATION_WRITE:
+        return kAsduTypeParameterWrite;
+    case IEC_PARAMETER_OPERATION_VERIFY:
+        return kAsduTypeParameterVerify;
+    case IEC_PARAMETER_OPERATION_SWITCH_GROUP:
+        return kAsduTypeSettingGroup;
+    default:
+        return 0;
+    }
+}
+
+iec_parameter_operation_t parameter_operation_from_type_id(uint8_t type_id) noexcept
+{
+    switch (type_id) {
+    case kAsduTypeParameterRead:
+        return IEC_PARAMETER_OPERATION_READ;
+    case kAsduTypeParameterWrite:
+        return IEC_PARAMETER_OPERATION_WRITE;
+    case kAsduTypeParameterVerify:
+        return IEC_PARAMETER_OPERATION_VERIFY;
+    case kAsduTypeSettingGroup:
+        return IEC_PARAMETER_OPERATION_SWITCH_GROUP;
+    default:
+        return {};
+    }
+}
+
 bool decode_command_result(
     const uint8_t *payload,
     uint32_t payload_size,
@@ -754,6 +1038,115 @@ void dispatch_clock_result(
     callback(session, &result, user_context);
 }
 
+void dispatch_parameter_messages(
+    iec_session_t *session,
+    const uint8_t *payload,
+    uint32_t payload_size,
+    const AsduLayout &layout,
+    iec_on_parameter_indication_fn indication_callback,
+    iec_on_parameter_result_fn result_callback,
+    void *user_context) noexcept
+{
+    if (payload == nullptr || payload_size < 2U + layout.cot_length + layout.common_address_length +
+            layout.information_object_address_length + 2U) {
+        return;
+    }
+
+    const iec_parameter_operation_t operation = parameter_operation_from_type_id(payload[0]);
+    if (operation == static_cast<iec_parameter_operation_t>(0) || (payload[1] & 0x7FU) == 0) {
+        return;
+    }
+
+    const uint32_t cause_offset = 2U;
+    const uint8_t raw_cause = payload[cause_offset];
+    const uint8_t cause = static_cast<uint8_t>(raw_cause & 0x3FU);
+    const uint32_t common_address_offset = cause_offset + layout.cot_length;
+    const uint16_t common_address =
+        read_uint16_le(payload + common_address_offset, layout.common_address_length);
+    const uint32_t info_offset = common_address_offset + layout.common_address_length;
+    uint32_t offset = info_offset + layout.information_object_address_length;
+
+    const uint8_t setting_group = payload[offset++];
+    const uint8_t flags = payload[offset++];
+    const bool is_final = (flags & 0x01U) != 0 || cause == kCauseActivationTermination ||
+        operation != IEC_PARAMETER_OPERATION_READ;
+    const bool has_descriptor = (flags & 0x02U) != 0;
+
+    uint32_t request_id = 0;
+    {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        auto match = std::find_if(
+            session->pending_parameters.begin(),
+            session->pending_parameters.end(),
+            [operation, common_address, setting_group](const iec_session_t::PendingParameter &pending) {
+                return pending.operation == operation && pending.common_address == common_address &&
+                    (pending.setting_group == setting_group || pending.setting_group == 0 || setting_group == 0);
+            });
+        if (match == session->pending_parameters.end()) {
+            return;
+        }
+        request_id = match->request_id;
+        if (is_final) {
+            session->pending_parameters.erase(match);
+        }
+    }
+
+    if (operation == IEC_PARAMETER_OPERATION_READ && indication_callback != nullptr) {
+        iec_parameter_indication_t indication{};
+        indication.request_id = request_id;
+        indication.operation = operation;
+        indication.setting_group = setting_group;
+        indication.is_final = is_final ? 1U : 0U;
+        indication.has_descriptor = has_descriptor ? 1U : 0U;
+
+        std::string string_value;
+        if (payload_size > offset &&
+            !decode_parameter_value(payload, payload_size, offset, indication.item, &string_value)) {
+            return;
+        }
+        if (has_descriptor) {
+            indication.descriptor.parameter_id = indication.item.parameter_id;
+            indication.descriptor.address = indication.item.address;
+            indication.descriptor.scope = indication.item.scope;
+            indication.descriptor.value_type = indication.item.value_type;
+            indication.descriptor.access = IEC_PARAMETER_ACCESS_READ_WRITE;
+            indication.descriptor.supports_verify = 1;
+        }
+
+        indication_callback(session, &indication, user_context);
+        return;
+    }
+
+    if (result_callback == nullptr) {
+        return;
+    }
+
+    iec_parameter_result_t result{};
+    result.request_id = request_id;
+    result.operation = operation;
+    result.setting_group = setting_group;
+    result.is_final = is_final ? 1U : 0U;
+
+    if (operation == IEC_PARAMETER_OPERATION_SWITCH_GROUP) {
+        result.result = cause == kCauseRequest ? IEC_PARAMETER_RESULT_CURRENT_GROUP :
+            ((raw_cause & 0x40U) != 0 ? IEC_PARAMETER_RESULT_REJECTED : IEC_PARAMETER_RESULT_GROUP_SWITCHED);
+    } else if (operation == IEC_PARAMETER_OPERATION_VERIFY) {
+        result.result =
+            (raw_cause & 0x40U) != 0 ? IEC_PARAMETER_RESULT_VERIFY_MISMATCH : IEC_PARAMETER_RESULT_VERIFY_OK;
+    } else {
+        result.result = (raw_cause & 0x40U) != 0 ? IEC_PARAMETER_RESULT_REJECTED :
+            IEC_PARAMETER_RESULT_ACCEPTED;
+    }
+
+    if (payload_size >= offset + 8) {
+        result.parameter_id = read_uint32_le(payload + offset, 4);
+        offset += 4;
+        result.address = read_uint32_le(payload + offset, 4);
+    }
+
+    result_callback(session, &result, user_context);
+}
+
 void dispatch_point_indications(
     iec_session_t *session,
     const uint8_t *payload,
@@ -844,6 +1237,8 @@ void receive_worker(iec_session_t *session) noexcept
         iec_on_point_indication_fn point_callback = nullptr;
         iec_on_command_result_fn command_callback = nullptr;
         iec_on_clock_result_fn clock_callback = nullptr;
+        iec_on_parameter_indication_fn parameter_indication_callback = nullptr;
+        iec_on_parameter_result_fn parameter_result_callback = nullptr;
         void *user_context = nullptr;
         uint32_t recv_timeout_ms = 50;
         uint32_t max_frame_len = 0;
@@ -860,6 +1255,8 @@ void receive_worker(iec_session_t *session) noexcept
             point_callback = session->callbacks.on_point_indication;
             command_callback = session->callbacks.on_command_result;
             clock_callback = session->callbacks.on_clock_result;
+            parameter_indication_callback = session->callbacks.on_parameter_indication;
+            parameter_result_callback = session->callbacks.on_parameter_result;
             user_context = session->config.user_context;
             recv_timeout_ms = std::min<uint32_t>(session->config.command_timeout_ms, 50U);
             if (recv_timeout_ms == 0) {
@@ -920,6 +1317,14 @@ void receive_worker(iec_session_t *session) noexcept
             received,
             layout,
             clock_callback,
+            user_context);
+        dispatch_parameter_messages(
+            session,
+            buffer.data(),
+            received,
+            layout,
+            parameter_indication_callback,
+            parameter_result_callback,
             user_context);
     }
 }
@@ -1624,6 +2029,336 @@ iec_status_t read_clock(
     }
 
     return IEC_STATUS_OK;
+}
+
+namespace {
+
+iec_status_t send_parameter_request(
+    iec_session_t *session,
+    uint8_t *frame,
+    uint32_t frame_size,
+    uint16_t common_address,
+    uint8_t setting_group,
+    iec_parameter_operation_t operation,
+    uint32_t *out_request_id) noexcept
+{
+    uint32_t request_id = 0;
+    iec_transport_t transport{};
+    iec_on_raw_asdu_fn raw_callback = nullptr;
+    void *user_context = nullptr;
+    uint32_t timeout_ms = 0;
+    bool raw_enabled = false;
+    AsduLayout layout{};
+
+    {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        if (session->state != IEC_RUNTIME_RUNNING) {
+            return IEC_STATUS_BAD_STATE;
+        }
+        if (frame_size > session->transport.max_plain_frame_len) {
+            return IEC_STATUS_INVALID_ARGUMENT;
+        }
+
+        request_id = take_next_request_id(*session);
+        session->pending_parameters.push_back(iec_session_t::PendingParameter{
+            request_id,
+            operation,
+            common_address,
+            setting_group,
+        });
+        transport = session->transport;
+        raw_callback = session->callbacks.on_raw_asdu;
+        user_context = session->config.user_context;
+        timeout_ms = session->config.command_timeout_ms;
+        raw_enabled = session->config.enable_raw_asdu != 0;
+        layout = get_asdu_layout(*session);
+    }
+
+    const int send_result = transport.send(transport.ctx, frame, frame_size, timeout_ms);
+    if (send_result != 0) {
+        {
+            std::lock_guard<std::mutex> lock(session->mutex);
+            auto match = std::find_if(
+                session->pending_parameters.begin(),
+                session->pending_parameters.end(),
+                [request_id](const iec_session_t::PendingParameter &pending) {
+                    return pending.request_id == request_id;
+                });
+            if (match != session->pending_parameters.end()) {
+                session->pending_parameters.erase(match);
+            }
+        }
+        return IEC_STATUS_IO_ERROR;
+    }
+
+    *out_request_id = request_id;
+
+    if (raw_enabled) {
+        notify_raw_asdu(
+            session,
+            IEC_RAW_ASDU_TX,
+            frame,
+            frame_size,
+            layout,
+            raw_callback,
+            user_context);
+    }
+
+    return IEC_STATUS_OK;
+}
+
+bool begin_parameter_frame(
+    iec_session_t *session,
+    iec_parameter_operation_t operation,
+    uint16_t common_address,
+    uint8_t setting_group,
+    uint8_t flags,
+    uint8_t *frame,
+    uint32_t &frame_size,
+    AsduLayout &layout) noexcept
+{
+    std::lock_guard<std::mutex> lock(session->mutex);
+    layout = get_asdu_layout(*session);
+    if (layout.cot_length == 0 || layout.common_address_length == 0 ||
+        layout.information_object_address_length == 0 ||
+        !fits_uint_le(common_address, layout.common_address_length)) {
+        return false;
+    }
+
+    frame[frame_size++] = parameter_type_id(operation);
+    frame[frame_size++] = 1;
+    write_uint_le(
+        frame,
+        frame_size,
+        operation == IEC_PARAMETER_OPERATION_READ ? kCauseRequest : kCauseActivation,
+        1);
+    if (layout.cot_length == 2) {
+        write_uint_le(frame, frame_size, kDefaultOriginatorAddress, 1);
+    }
+    write_uint_le(frame, frame_size, common_address, layout.common_address_length);
+    write_uint_le(
+        frame,
+        frame_size,
+        kParameterChannelInformationObjectAddress,
+        layout.information_object_address_length);
+    frame[frame_size++] = setting_group;
+    frame[frame_size++] = flags;
+    return true;
+}
+
+} // namespace
+
+iec_status_t read_parameters(
+    iec_session_t *session,
+    const iec_parameter_read_request_t *request,
+    uint32_t *out_request_id) noexcept
+{
+    if (out_request_id != nullptr) {
+        *out_request_id = 0;
+    }
+    if (session == nullptr || request == nullptr || out_request_id == nullptr ||
+        !validate_parameter_read_request(*request)) {
+        return IEC_STATUS_INVALID_ARGUMENT;
+    }
+
+    uint8_t frame[192]{};
+    uint32_t frame_size = 0;
+    AsduLayout layout{};
+    const uint8_t flags = static_cast<uint8_t>(request->include_descriptor != 0 ? 0x02U : 0U);
+
+    {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        if (session->state != IEC_RUNTIME_RUNNING) {
+            return IEC_STATUS_BAD_STATE;
+        }
+    }
+    if (!begin_parameter_frame(
+            session,
+            IEC_PARAMETER_OPERATION_READ,
+            request->common_address,
+            request->setting_group,
+            flags,
+            frame,
+            frame_size,
+            layout)) {
+        return IEC_STATUS_INVALID_ARGUMENT;
+    }
+
+    frame[frame_size++] = static_cast<uint8_t>(request->read_mode);
+    frame[frame_size++] = static_cast<uint8_t>(request->scope);
+    write_uint_le(frame, frame_size, request->start_address, 4);
+    write_uint_le(frame, frame_size, request->end_address, 4);
+    const uint32_t group_length =
+        request->group_name == nullptr ? 0U : static_cast<uint32_t>(std::strlen(request->group_name));
+    frame[frame_size++] = static_cast<uint8_t>(group_length);
+    if (group_length > 0) {
+        std::memcpy(frame + frame_size, request->group_name, group_length);
+        frame_size += group_length;
+    }
+
+    return send_parameter_request(
+        session,
+        frame,
+        frame_size,
+        request->common_address,
+        request->setting_group,
+        IEC_PARAMETER_OPERATION_READ,
+        out_request_id);
+}
+
+iec_status_t write_parameters(
+    iec_session_t *session,
+    const iec_parameter_write_request_t *request,
+    uint32_t *out_request_id) noexcept
+{
+    if (out_request_id != nullptr) {
+        *out_request_id = 0;
+    }
+    if (session == nullptr || request == nullptr || out_request_id == nullptr ||
+        !is_binary_flag(request->verify_after_write) ||
+        !validate_parameter_items(request->items, request->item_count)) {
+        return IEC_STATUS_INVALID_ARGUMENT;
+    }
+
+    uint8_t frame[512]{};
+    uint32_t frame_size = 0;
+    AsduLayout layout{};
+    const uint8_t flags = static_cast<uint8_t>(request->verify_after_write != 0 ? 0x02U : 0U);
+
+    {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        if (session->state != IEC_RUNTIME_RUNNING) {
+            return IEC_STATUS_BAD_STATE;
+        }
+    }
+    if (!begin_parameter_frame(
+            session,
+            IEC_PARAMETER_OPERATION_WRITE,
+            request->common_address,
+            request->setting_group,
+            flags,
+            frame,
+            frame_size,
+            layout)) {
+        return IEC_STATUS_INVALID_ARGUMENT;
+    }
+
+    frame[frame_size++] = static_cast<uint8_t>(request->item_count);
+    for (uint32_t i = 0; i < request->item_count; ++i) {
+        if (!append_parameter_value(request->items[i], frame, frame_size, sizeof(frame))) {
+            return IEC_STATUS_INVALID_ARGUMENT;
+        }
+    }
+
+    return send_parameter_request(
+        session,
+        frame,
+        frame_size,
+        request->common_address,
+        request->setting_group,
+        IEC_PARAMETER_OPERATION_WRITE,
+        out_request_id);
+}
+
+iec_status_t verify_parameters(
+    iec_session_t *session,
+    const iec_parameter_verify_request_t *request,
+    uint32_t *out_request_id) noexcept
+{
+    if (out_request_id != nullptr) {
+        *out_request_id = 0;
+    }
+    if (session == nullptr || request == nullptr || out_request_id == nullptr ||
+        !validate_parameter_items(request->expected_items, request->item_count)) {
+        return IEC_STATUS_INVALID_ARGUMENT;
+    }
+
+    uint8_t frame[512]{};
+    uint32_t frame_size = 0;
+    AsduLayout layout{};
+
+    {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        if (session->state != IEC_RUNTIME_RUNNING) {
+            return IEC_STATUS_BAD_STATE;
+        }
+    }
+    if (!begin_parameter_frame(
+            session,
+            IEC_PARAMETER_OPERATION_VERIFY,
+            request->common_address,
+            request->setting_group,
+            0,
+            frame,
+            frame_size,
+            layout)) {
+        return IEC_STATUS_INVALID_ARGUMENT;
+    }
+
+    frame[frame_size++] = static_cast<uint8_t>(request->item_count);
+    for (uint32_t i = 0; i < request->item_count; ++i) {
+        if (!append_parameter_value(request->expected_items[i], frame, frame_size, sizeof(frame))) {
+            return IEC_STATUS_INVALID_ARGUMENT;
+        }
+    }
+
+    return send_parameter_request(
+        session,
+        frame,
+        frame_size,
+        request->common_address,
+        request->setting_group,
+        IEC_PARAMETER_OPERATION_VERIFY,
+        out_request_id);
+}
+
+iec_status_t switch_setting_group(
+    iec_session_t *session,
+    const iec_setting_group_request_t *request,
+    uint32_t *out_request_id) noexcept
+{
+    if (out_request_id != nullptr) {
+        *out_request_id = 0;
+    }
+    if (session == nullptr || request == nullptr || out_request_id == nullptr ||
+        !is_setting_group_action_valid(request->action) ||
+        (request->action == IEC_SETTING_GROUP_ACTION_SWITCH && request->target_group == 0)) {
+        return IEC_STATUS_INVALID_ARGUMENT;
+    }
+
+    uint8_t frame[32]{};
+    uint32_t frame_size = 0;
+    AsduLayout layout{};
+
+    {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        if (session->state != IEC_RUNTIME_RUNNING) {
+            return IEC_STATUS_BAD_STATE;
+        }
+    }
+    if (!begin_parameter_frame(
+            session,
+            IEC_PARAMETER_OPERATION_SWITCH_GROUP,
+            request->common_address,
+            request->target_group,
+            0,
+            frame,
+            frame_size,
+            layout)) {
+        return IEC_STATUS_INVALID_ARGUMENT;
+    }
+
+    frame[frame_size++] = static_cast<uint8_t>(request->action);
+    frame[frame_size++] = request->target_group;
+
+    return send_parameter_request(
+        session,
+        frame,
+        frame_size,
+        request->common_address,
+        request->target_group,
+        IEC_PARAMETER_OPERATION_SWITCH_GROUP,
+        out_request_id);
 }
 
 iec_status_t set_option(iec_session_t *session, iec_option_t option, const void *value, uint32_t value_size) noexcept

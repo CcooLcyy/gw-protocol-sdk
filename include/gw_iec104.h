@@ -200,6 +200,150 @@ typedef struct iec_clock_result {
     const char *detail_message;
 } iec_clock_result_t;
 
+typedef enum iec_parameter_scope {
+    IEC_PARAMETER_SCOPE_ALL = 0,
+    IEC_PARAMETER_SCOPE_FIXED = 1,
+    IEC_PARAMETER_SCOPE_RUNNING = 2,
+    IEC_PARAMETER_SCOPE_ACTION = 3,
+    IEC_PARAMETER_SCOPE_WIRELESS = 4,
+    IEC_PARAMETER_SCOPE_POWER = 5,
+    IEC_PARAMETER_SCOPE_LINE_LOSS = 6,
+    IEC_PARAMETER_SCOPE_POINT_TABLE = 7
+} iec_parameter_scope_t;
+
+typedef enum iec_parameter_access {
+    IEC_PARAMETER_ACCESS_READ_ONLY = 1,
+    IEC_PARAMETER_ACCESS_WRITE_ONLY = 2,
+    IEC_PARAMETER_ACCESS_READ_WRITE = 3
+} iec_parameter_access_t;
+
+typedef enum iec_parameter_value_type {
+    IEC_PARAMETER_VALUE_BOOL = 1,
+    IEC_PARAMETER_VALUE_INT = 2,
+    IEC_PARAMETER_VALUE_UINT = 3,
+    IEC_PARAMETER_VALUE_FLOAT = 4,
+    IEC_PARAMETER_VALUE_ENUM = 5,
+    IEC_PARAMETER_VALUE_STRING = 6
+} iec_parameter_value_type_t;
+
+typedef union iec_parameter_scalar {
+    uint8_t bool_value;
+    int32_t int_value;
+    uint32_t uint_value;
+    float float_value;
+    uint32_t enum_value;
+    const char *string_value;
+} iec_parameter_scalar_t;
+
+typedef struct iec_parameter_item {
+    uint32_t parameter_id;
+    uint32_t address;
+    iec_parameter_scope_t scope;
+    iec_parameter_value_type_t value_type;
+    iec_parameter_scalar_t value;
+} iec_parameter_item_t;
+
+typedef struct iec_parameter_descriptor {
+    uint32_t parameter_id;
+    uint32_t address;
+    iec_parameter_scope_t scope;
+    iec_parameter_value_type_t value_type;
+    iec_parameter_access_t access;
+    const char *name;
+    const char *group_name;
+    const char *unit;
+    double min_value;
+    double max_value;
+    double step_value;
+    const char *default_value_text;
+    uint8_t supports_template;
+    uint8_t supports_verify;
+} iec_parameter_descriptor_t;
+
+typedef enum iec_parameter_read_mode {
+    IEC_PARAMETER_READ_ALL = 1,
+    IEC_PARAMETER_READ_BY_SCOPE = 2,
+    IEC_PARAMETER_READ_BY_GROUP = 3,
+    IEC_PARAMETER_READ_BY_ADDRESS_RANGE = 4
+} iec_parameter_read_mode_t;
+
+typedef struct iec_parameter_read_request {
+    uint16_t common_address;
+    iec_parameter_read_mode_t read_mode;
+    iec_parameter_scope_t scope;
+    const char *group_name;
+    uint32_t start_address;
+    uint32_t end_address;
+    uint8_t setting_group;
+    uint8_t include_descriptor;
+} iec_parameter_read_request_t;
+
+typedef struct iec_parameter_write_request {
+    uint16_t common_address;
+    uint8_t setting_group;
+    const iec_parameter_item_t *items;
+    uint32_t item_count;
+    uint8_t verify_after_write;
+} iec_parameter_write_request_t;
+
+typedef struct iec_parameter_verify_request {
+    uint16_t common_address;
+    uint8_t setting_group;
+    const iec_parameter_item_t *expected_items;
+    uint32_t item_count;
+} iec_parameter_verify_request_t;
+
+typedef enum iec_setting_group_action {
+    IEC_SETTING_GROUP_ACTION_GET_CURRENT = 1,
+    IEC_SETTING_GROUP_ACTION_SWITCH = 2
+} iec_setting_group_action_t;
+
+typedef struct iec_setting_group_request {
+    uint16_t common_address;
+    iec_setting_group_action_t action;
+    uint8_t target_group;
+} iec_setting_group_request_t;
+
+typedef enum iec_parameter_operation {
+    IEC_PARAMETER_OPERATION_READ = 1,
+    IEC_PARAMETER_OPERATION_WRITE = 2,
+    IEC_PARAMETER_OPERATION_VERIFY = 3,
+    IEC_PARAMETER_OPERATION_SWITCH_GROUP = 4
+} iec_parameter_operation_t;
+
+typedef enum iec_parameter_result_code {
+    IEC_PARAMETER_RESULT_ACCEPTED = 1,
+    IEC_PARAMETER_RESULT_REJECTED = 2,
+    IEC_PARAMETER_RESULT_VERIFY_OK = 3,
+    IEC_PARAMETER_RESULT_VERIFY_MISMATCH = 4,
+    IEC_PARAMETER_RESULT_READ_ONLY = 5,
+    IEC_PARAMETER_RESULT_OUT_OF_RANGE = 6,
+    IEC_PARAMETER_RESULT_GROUP_SWITCHED = 7,
+    IEC_PARAMETER_RESULT_TIMEOUT = 8,
+    IEC_PARAMETER_RESULT_PROTOCOL_ERROR = 9,
+    IEC_PARAMETER_RESULT_CURRENT_GROUP = 10
+} iec_parameter_result_code_t;
+
+typedef struct iec_parameter_indication {
+    uint32_t request_id;
+    iec_parameter_operation_t operation;
+    uint8_t setting_group;
+    uint8_t is_final;
+    uint8_t has_descriptor;
+    iec_parameter_item_t item;
+    iec_parameter_descriptor_t descriptor;
+} iec_parameter_indication_t;
+
+typedef struct iec_parameter_result {
+    uint32_t request_id;
+    iec_parameter_operation_t operation;
+    iec_parameter_result_code_t result;
+    uint32_t parameter_id;
+    uint32_t address;
+    uint8_t setting_group;
+    uint8_t is_final;
+} iec_parameter_result_t;
+
 typedef enum iec_raw_asdu_direction {
     IEC_RAW_ASDU_RX = 1,
     IEC_RAW_ASDU_TX = 2
@@ -294,12 +438,24 @@ typedef void(GW_PROTOCOL_CALL *iec_on_clock_result_fn)(
     const iec_clock_result_t *result,
     void *user_context);
 
+typedef void(GW_PROTOCOL_CALL *iec_on_parameter_indication_fn)(
+    iec_session_t *session,
+    const iec_parameter_indication_t *indication,
+    void *user_context);
+
+typedef void(GW_PROTOCOL_CALL *iec_on_parameter_result_fn)(
+    iec_session_t *session,
+    const iec_parameter_result_t *result,
+    void *user_context);
+
 typedef struct iec_callbacks {
     iec_on_session_state_fn on_session_state;
     iec_on_point_indication_fn on_point_indication;
     iec_on_command_result_fn on_command_result;
     iec_on_raw_asdu_fn on_raw_asdu;
     iec_on_clock_result_fn on_clock_result;
+    iec_on_parameter_indication_fn on_parameter_indication;
+    iec_on_parameter_result_fn on_parameter_result;
 } iec_callbacks_t;
 
 #ifdef __cplusplus
@@ -355,6 +511,22 @@ GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL iec104_clock_sync(
 GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL iec104_read_clock(
     iec_session_t *session,
     const iec_clock_read_request_t *request,
+    uint32_t *out_request_id);
+GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL iec104_read_parameters(
+    iec_session_t *session,
+    const iec_parameter_read_request_t *request,
+    uint32_t *out_request_id);
+GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL iec104_write_parameters(
+    iec_session_t *session,
+    const iec_parameter_write_request_t *request,
+    uint32_t *out_request_id);
+GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL iec104_verify_parameters(
+    iec_session_t *session,
+    const iec_parameter_verify_request_t *request,
+    uint32_t *out_request_id);
+GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL iec104_switch_setting_group(
+    iec_session_t *session,
+    const iec_setting_group_request_t *request,
     uint32_t *out_request_id);
 GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL iec104_set_option(
     iec_session_t *session,

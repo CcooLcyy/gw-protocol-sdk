@@ -1,7 +1,7 @@
 # Release API export manifest.
 # Format: <target>:<symbol>
 #
-# Current implementation stage: lifecycle, configuration, interrogation, point read, and raw ASDU send APIs.
+# Current implementation stage: lifecycle, configuration, interrogation, point read, clock, parameter, and raw ASDU send APIs.
 
 # GW_m101 exports
 GW_m101:m101_create
@@ -15,6 +15,10 @@ GW_m101:m101_control_point
 GW_m101:m101_read_point
 GW_m101:m101_clock_sync
 GW_m101:m101_read_clock
+GW_m101:m101_read_parameters
+GW_m101:m101_write_parameters
+GW_m101:m101_verify_parameters
+GW_m101:m101_switch_setting_group
 GW_m101:m101_set_option
 GW_m101:m101_send_raw_asdu
 GW_m101:m101_validate_config
@@ -31,6 +35,10 @@ GW_iec101:iec101_control_point
 GW_iec101:iec101_read_point
 GW_iec101:iec101_clock_sync
 GW_iec101:iec101_read_clock
+GW_iec101:iec101_read_parameters
+GW_iec101:iec101_write_parameters
+GW_iec101:iec101_verify_parameters
+GW_iec101:iec101_switch_setting_group
 GW_iec101:iec101_set_option
 GW_iec101:iec101_send_raw_asdu
 GW_iec101:iec101_validate_config
@@ -47,6 +55,10 @@ GW_iec104:iec104_control_point
 GW_iec104:iec104_read_point
 GW_iec104:iec104_clock_sync
 GW_iec104:iec104_read_clock
+GW_iec104:iec104_read_parameters
+GW_iec104:iec104_write_parameters
+GW_iec104:iec104_verify_parameters
+GW_iec104:iec104_switch_setting_group
 GW_iec104:iec104_set_option
 GW_iec104:iec104_send_raw_asdu
 GW_iec104:iec104_validate_config

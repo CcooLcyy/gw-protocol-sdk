@@ -76,6 +76,38 @@ GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL m101_read_clock(
     return gw::protocol::read_clock(session, request, out_request_id);
 }
 
+GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL m101_read_parameters(
+    iec_session_t *session,
+    const iec_parameter_read_request_t *request,
+    uint32_t *out_request_id)
+{
+    return gw::protocol::read_parameters(session, request, out_request_id);
+}
+
+GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL m101_write_parameters(
+    iec_session_t *session,
+    const iec_parameter_write_request_t *request,
+    uint32_t *out_request_id)
+{
+    return gw::protocol::write_parameters(session, request, out_request_id);
+}
+
+GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL m101_verify_parameters(
+    iec_session_t *session,
+    const iec_parameter_verify_request_t *request,
+    uint32_t *out_request_id)
+{
+    return gw::protocol::verify_parameters(session, request, out_request_id);
+}
+
+GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL m101_switch_setting_group(
+    iec_session_t *session,
+    const iec_setting_group_request_t *request,
+    uint32_t *out_request_id)
+{
+    return gw::protocol::switch_setting_group(session, request, out_request_id);
+}
+
 GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL m101_set_option(
     iec_session_t *session,
     iec_option_t option,

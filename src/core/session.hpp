@@ -44,6 +44,22 @@ iec_status_t read_clock(
     iec_session_t *session,
     const iec_clock_read_request_t *request,
     uint32_t *out_request_id) noexcept;
+iec_status_t read_parameters(
+    iec_session_t *session,
+    const iec_parameter_read_request_t *request,
+    uint32_t *out_request_id) noexcept;
+iec_status_t write_parameters(
+    iec_session_t *session,
+    const iec_parameter_write_request_t *request,
+    uint32_t *out_request_id) noexcept;
+iec_status_t verify_parameters(
+    iec_session_t *session,
+    const iec_parameter_verify_request_t *request,
+    uint32_t *out_request_id) noexcept;
+iec_status_t switch_setting_group(
+    iec_session_t *session,
+    const iec_setting_group_request_t *request,
+    uint32_t *out_request_id) noexcept;
 iec_status_t set_option(iec_session_t *session, iec_option_t option, const void *value, uint32_t value_size) noexcept;
 iec_status_t send_raw_asdu(iec_session_t *session, const iec_raw_asdu_tx_t *request) noexcept;
 iec_status_t start_session(iec_session_t *session) noexcept;
