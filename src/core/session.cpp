@@ -32,6 +32,27 @@ struct iec_session {
         uint8_t setting_group = 0;
     };
 
+    struct PendingFileList {
+        uint32_t request_id = 0;
+        uint16_t common_address = 0;
+        std::string directory_name;
+    };
+
+    struct FileTransfer {
+        uint32_t transfer_id = 0;
+        iec_file_transfer_direction_t direction = IEC_FILE_TRANSFER_DIRECTION_READ;
+        iec_file_transfer_state_t state = IEC_FILE_TRANSFER_STATE_ACCEPTED;
+        uint16_t common_address = 0;
+        std::string directory_name;
+        std::string file_name;
+        uint32_t total_size = 0;
+        uint32_t acknowledged_offset = 0;
+        uint8_t is_resumable = 1;
+        iec_file_result_code_t last_result = IEC_FILE_RESULT_ACCEPTED;
+        uint8_t last_cause_of_transmission = 0;
+        int32_t last_native_error_code = 0;
+    };
+
     gw::protocol::Profile profile;
     iec_session_config_t config;
     iec_transport_t transport;
@@ -42,10 +63,13 @@ struct iec_session {
     std::vector<PendingCommand> pending_commands;
     std::vector<PendingClock> pending_clocks;
     std::vector<PendingParameter> pending_parameters;
+    std::vector<PendingFileList> pending_file_lists;
+    std::vector<FileTransfer> file_transfers;
     bool stop_requested = false;
     iec_runtime_state_t state = IEC_RUNTIME_CREATED;
     uint32_t next_command_id = 1;
     uint32_t next_request_id = 1;
+    uint32_t next_transfer_id = 1;
 };
 
 namespace gw::protocol {
@@ -84,6 +108,10 @@ constexpr uint8_t kAsduTypeParameterRead = 202;
 constexpr uint8_t kAsduTypeParameterWrite = 203;
 constexpr uint8_t kAsduTypeParameterVerify = 204;
 constexpr uint8_t kAsduTypeSettingGroup = 205;
+constexpr uint8_t kAsduTypeFileList = 206;
+constexpr uint8_t kAsduTypeFileRead = 207;
+constexpr uint8_t kAsduTypeFileWrite = 208;
+constexpr uint8_t kAsduTypeFileCancel = 209;
 constexpr uint8_t kCauseRequest = 5;
 constexpr uint8_t kCauseActivation = 6;
 constexpr uint8_t kCauseActivationConfirm = 7;
@@ -97,8 +125,11 @@ constexpr uint8_t kCounterInterrogationMaxFreeze = 3;
 constexpr uint8_t kSelectExecuteQualifierMask = 0x80;
 constexpr uint32_t kClockSyncInformationObjectAddress = 0;
 constexpr uint32_t kParameterChannelInformationObjectAddress = 0;
+constexpr uint32_t kFileChannelInformationObjectAddress = 0;
 constexpr uint32_t kMaxParameterItemsPerRequest = 32;
 constexpr uint32_t kMaxParameterStringBytes = 64;
+constexpr uint32_t kMaxFileNameBytes = 128;
+constexpr uint32_t kMaxFileChunkBytes = 1024;
 
 bool is_link_mode_valid(iec101_link_mode_t mode) noexcept
 {
@@ -343,6 +374,61 @@ bool validate_parameter_items(const iec_parameter_item_t *items, uint32_t item_c
     return true;
 }
 
+bool is_non_empty_bounded_string(const char *value, uint32_t max_length) noexcept
+{
+    return value != nullptr && value[0] != '\0' && std::strlen(value) <= max_length;
+}
+
+bool append_string_field(
+    uint8_t *frame,
+    uint32_t &frame_size,
+    uint32_t capacity,
+    const char *value,
+    uint32_t max_length) noexcept
+{
+    if (!is_non_empty_bounded_string(value, max_length)) {
+        return false;
+    }
+    const uint32_t length = static_cast<uint32_t>(std::strlen(value));
+    if (length > 255 || capacity < frame_size + 1 + length) {
+        return false;
+    }
+    frame[frame_size++] = static_cast<uint8_t>(length);
+    std::memcpy(frame + frame_size, value, length);
+    frame_size += length;
+    return true;
+}
+
+bool read_string_field(
+    const uint8_t *payload,
+    uint32_t payload_size,
+    uint32_t &offset,
+    std::string &out,
+    uint32_t max_length) noexcept
+{
+    if (payload_size < offset + 1) {
+        return false;
+    }
+    const uint8_t length = payload[offset++];
+    if (length == 0 || length > max_length || payload_size < offset + length) {
+        return false;
+    }
+    out.assign(reinterpret_cast<const char *>(payload + offset), length);
+    offset += length;
+    return true;
+}
+
+uint32_t effective_file_chunk_size(const iec_session_t &session, uint32_t requested) noexcept
+{
+    uint32_t chunk_size = requested == 0 ? kMaxFileChunkBytes : requested;
+    if (session.profile == Profile::M101) {
+        const auto &config = std::get<m101_master_config_t>(session.protocol_config);
+        chunk_size = std::min<uint32_t>(chunk_size, config.preferred_file_chunk_size);
+    }
+    chunk_size = std::min<uint32_t>(chunk_size, kMaxFileChunkBytes);
+    return std::min<uint32_t>(chunk_size, session.transport.max_plain_frame_len);
+}
+
 AsduLayout get_asdu_layout(const iec_session_t &session) noexcept
 {
     switch (session.profile) {
@@ -495,6 +581,15 @@ uint32_t take_next_request_id(iec_session_t &session) noexcept
         session.next_request_id = 1;
     }
     return request_id;
+}
+
+uint32_t take_next_transfer_id(iec_session_t &session) noexcept
+{
+    const uint32_t transfer_id = session.next_transfer_id++;
+    if (session.next_transfer_id == 0) {
+        session.next_transfer_id = 1;
+    }
+    return transfer_id;
 }
 
 void notify_state(iec_session_t *session, iec_runtime_state_t state) noexcept
@@ -862,6 +957,53 @@ iec_parameter_operation_t parameter_operation_from_type_id(uint8_t type_id) noex
     }
 }
 
+uint8_t file_type_id(iec_file_operation_t operation) noexcept
+{
+    switch (operation) {
+    case IEC_FILE_OPERATION_LIST:
+        return kAsduTypeFileList;
+    case IEC_FILE_OPERATION_READ:
+        return kAsduTypeFileRead;
+    case IEC_FILE_OPERATION_WRITE:
+        return kAsduTypeFileWrite;
+    case IEC_FILE_OPERATION_CANCEL:
+        return kAsduTypeFileCancel;
+    default:
+        return 0;
+    }
+}
+
+iec_file_operation_t file_operation_from_type_id(uint8_t type_id) noexcept
+{
+    switch (type_id) {
+    case kAsduTypeFileList:
+        return IEC_FILE_OPERATION_LIST;
+    case kAsduTypeFileRead:
+        return IEC_FILE_OPERATION_READ;
+    case kAsduTypeFileWrite:
+        return IEC_FILE_OPERATION_WRITE;
+    case kAsduTypeFileCancel:
+        return IEC_FILE_OPERATION_CANCEL;
+    default:
+        return {};
+    }
+}
+
+iec_file_result_code_t file_result_from_cause(uint8_t raw_cause, uint8_t result_hint) noexcept
+{
+    if (result_hint >= IEC_FILE_RESULT_ACCEPTED && result_hint <= IEC_FILE_RESULT_NOT_FOUND) {
+        return static_cast<iec_file_result_code_t>(result_hint);
+    }
+    if ((raw_cause & 0x40U) != 0) {
+        return IEC_FILE_RESULT_NEGATIVE_CONFIRM;
+    }
+    const uint8_t cause = static_cast<uint8_t>(raw_cause & 0x3FU);
+    if (cause == kCauseActivationTermination) {
+        return IEC_FILE_RESULT_COMPLETED;
+    }
+    return IEC_FILE_RESULT_ACCEPTED;
+}
+
 bool decode_command_result(
     const uint8_t *payload,
     uint32_t payload_size,
@@ -1147,6 +1289,261 @@ void dispatch_parameter_messages(
     result_callback(session, &result, user_context);
 }
 
+void dispatch_file_messages(
+    iec_session_t *session,
+    const uint8_t *payload,
+    uint32_t payload_size,
+    const AsduLayout &layout,
+    iec_on_file_list_indication_fn list_callback,
+    iec_on_file_data_indication_fn data_callback,
+    iec_on_file_operation_result_fn result_callback,
+    void *user_context) noexcept
+{
+    if (payload == nullptr || payload_size < 2U + layout.cot_length + layout.common_address_length +
+            layout.information_object_address_length + 2U) {
+        return;
+    }
+
+    const iec_file_operation_t operation = file_operation_from_type_id(payload[0]);
+    if (operation == static_cast<iec_file_operation_t>(0) || (payload[1] & 0x7FU) == 0) {
+        return;
+    }
+
+    const uint32_t cause_offset = 2U;
+    const uint8_t raw_cause = payload[cause_offset];
+    const uint8_t cause = static_cast<uint8_t>(raw_cause & 0x3FU);
+    const uint32_t common_address_offset = cause_offset + layout.cot_length;
+    const uint16_t common_address =
+        read_uint16_le(payload + common_address_offset, layout.common_address_length);
+    const uint32_t info_offset = common_address_offset + layout.common_address_length;
+    uint32_t offset = info_offset + layout.information_object_address_length;
+
+    const uint8_t flags = payload[offset++];
+    const uint8_t result_hint = payload[offset++];
+    const bool is_final = (flags & 0x01U) != 0 || cause == kCauseActivationTermination ||
+        operation == IEC_FILE_OPERATION_CANCEL;
+    const iec_file_result_code_t result_code = file_result_from_cause(raw_cause, result_hint);
+
+    if (operation == IEC_FILE_OPERATION_LIST) {
+        std::string directory;
+        if (!read_string_field(payload, payload_size, offset, directory, kMaxFileNameBytes)) {
+            return;
+        }
+
+        uint32_t request_id = 0;
+        {
+            std::lock_guard<std::mutex> lock(session->mutex);
+            auto match = std::find_if(
+                session->pending_file_lists.begin(),
+                session->pending_file_lists.end(),
+                [common_address, &directory](const iec_session_t::PendingFileList &pending) {
+                    return pending.common_address == common_address && pending.directory_name == directory;
+                });
+            if (match == session->pending_file_lists.end()) {
+                return;
+            }
+            request_id = match->request_id;
+            if (is_final) {
+                session->pending_file_lists.erase(match);
+            }
+        }
+
+        if (list_callback != nullptr) {
+            std::vector<iec_file_entry_t> entries;
+            std::vector<std::string> directories;
+            std::vector<std::string> file_names;
+            std::vector<std::string> checksums;
+            if (payload_size > offset) {
+                const uint8_t entry_count = payload[offset++];
+                try {
+                    entries.resize(entry_count);
+                    directories.resize(entry_count);
+                    file_names.resize(entry_count);
+                    checksums.resize(entry_count);
+                } catch (...) {
+                    return;
+                }
+                for (uint8_t i = 0; i < entry_count; ++i) {
+                    std::string entry_directory;
+                    std::string file_name;
+                    std::string checksum;
+                    if (!read_string_field(payload, payload_size, offset, entry_directory, kMaxFileNameBytes) ||
+                        !read_string_field(payload, payload_size, offset, file_name, kMaxFileNameBytes) ||
+                        payload_size < offset + 15) {
+                        return;
+                    }
+                    directories[i] = std::move(entry_directory);
+                    file_names[i] = std::move(file_name);
+                    entries[i].directory_name = directories[i].c_str();
+                    entries[i].file_name = file_names[i].c_str();
+                    entries[i].file_size = read_uint32_le(payload + offset, 4);
+                    offset += 4;
+                    const uint32_t timestamp_low = read_uint32_le(payload + offset, 4);
+                    offset += 4;
+                    const uint32_t timestamp_high = read_uint32_le(payload + offset, 4);
+                    offset += 4;
+                    entries[i].modified_timestamp_ms =
+                        (static_cast<uint64_t>(timestamp_high) << 32U) | timestamp_low;
+                    entries[i].is_directory = payload[offset++];
+                    entries[i].is_read_only = payload[offset++];
+                    const uint8_t checksum_length = payload[offset++];
+                    if (payload_size < offset + checksum_length) {
+                        return;
+                    }
+                    checksums[i].assign(reinterpret_cast<const char *>(payload + offset), checksum_length);
+                    offset += checksum_length;
+                    entries[i].checksum_text = checksums[i].empty() ? nullptr : checksums[i].c_str();
+                }
+            }
+
+            iec_file_list_indication_t indication{};
+            indication.request_id = request_id;
+            indication.common_address = common_address;
+            indication.directory_name = directory.c_str();
+            indication.entries = entries.empty() ? nullptr : entries.data();
+            indication.entry_count = static_cast<uint32_t>(entries.size());
+            indication.is_final = is_final ? 1U : 0U;
+            list_callback(session, &indication, user_context);
+        }
+
+        if (is_final && result_callback != nullptr) {
+            iec_file_operation_result_t result{};
+            result.request_id = request_id;
+            result.operation = IEC_FILE_OPERATION_LIST;
+            result.result = result_code == IEC_FILE_RESULT_ACCEPTED ? IEC_FILE_RESULT_COMPLETED : result_code;
+            result.common_address = common_address;
+            result.directory_name = directory.c_str();
+            result.cause_of_transmission = cause;
+            result.is_final = 1;
+            result_callback(session, &result, user_context);
+        }
+        return;
+    }
+
+    if (payload_size < offset + 4) {
+        return;
+    }
+    const uint32_t transfer_id = read_uint32_le(payload + offset, 4);
+    offset += 4;
+
+    iec_session_t::FileTransfer transfer_snapshot{};
+    {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        auto match = std::find_if(
+            session->file_transfers.begin(),
+            session->file_transfers.end(),
+            [transfer_id](const iec_session_t::FileTransfer &transfer) {
+                return transfer.transfer_id == transfer_id;
+            });
+        if (match == session->file_transfers.end()) {
+            return;
+        }
+        match->last_result = result_code;
+        match->last_cause_of_transmission = cause;
+        if (operation == IEC_FILE_OPERATION_CANCEL) {
+            match->state = IEC_FILE_TRANSFER_STATE_CANCELED;
+            match->is_resumable = 0;
+        } else if (result_code == IEC_FILE_RESULT_COMPLETED) {
+            match->state = IEC_FILE_TRANSFER_STATE_COMPLETED;
+            match->is_resumable = 0;
+        } else if (result_code == IEC_FILE_RESULT_ACCEPTED) {
+            match->state = IEC_FILE_TRANSFER_STATE_RUNNING;
+        } else {
+            match->state = IEC_FILE_TRANSFER_STATE_FAILED;
+        }
+        transfer_snapshot = *match;
+    }
+
+    if (operation == IEC_FILE_OPERATION_READ) {
+        if (payload_size < offset + 16) {
+            return;
+        }
+        const uint32_t current_offset = read_uint32_le(payload + offset, 4);
+        offset += 4;
+        const uint32_t next_offset = read_uint32_le(payload + offset, 4);
+        offset += 4;
+        const uint32_t total_size = read_uint32_le(payload + offset, 4);
+        offset += 4;
+        const uint32_t data_size = read_uint32_le(payload + offset, 4);
+        offset += 4;
+        if (payload_size < offset + data_size) {
+            return;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(session->mutex);
+            auto match = std::find_if(
+                session->file_transfers.begin(),
+                session->file_transfers.end(),
+                [transfer_id](const iec_session_t::FileTransfer &transfer) {
+                    return transfer.transfer_id == transfer_id;
+                });
+            if (match != session->file_transfers.end()) {
+                match->acknowledged_offset = next_offset;
+                if (total_size != 0) {
+                    match->total_size = total_size;
+                }
+                transfer_snapshot = *match;
+            }
+        }
+
+        if (data_callback != nullptr) {
+            iec_file_data_indication_t indication{};
+            indication.transfer_id = transfer_id;
+            indication.direction = IEC_FILE_TRANSFER_DIRECTION_READ;
+            indication.common_address = common_address;
+            indication.directory_name = transfer_snapshot.directory_name.c_str();
+            indication.file_name = transfer_snapshot.file_name.c_str();
+            indication.total_size = transfer_snapshot.total_size;
+            indication.current_offset = current_offset;
+            indication.next_offset = next_offset;
+            indication.data = payload + offset;
+            indication.data_size = data_size;
+            indication.is_final = is_final ? 1U : 0U;
+            data_callback(session, &indication, user_context);
+        }
+    }
+
+    if (operation == IEC_FILE_OPERATION_WRITE && payload_size >= offset + 8) {
+        const uint32_t acknowledged_offset = read_uint32_le(payload + offset, 4);
+        offset += 4;
+        const uint32_t total_size = read_uint32_le(payload + offset, 4);
+        {
+            std::lock_guard<std::mutex> lock(session->mutex);
+            auto match = std::find_if(
+                session->file_transfers.begin(),
+                session->file_transfers.end(),
+                [transfer_id](const iec_session_t::FileTransfer &transfer) {
+                    return transfer.transfer_id == transfer_id;
+                });
+            if (match != session->file_transfers.end()) {
+                match->acknowledged_offset = acknowledged_offset;
+                if (total_size != 0) {
+                    match->total_size = total_size;
+                }
+                transfer_snapshot = *match;
+            }
+        }
+    }
+
+    if ((is_final || operation == IEC_FILE_OPERATION_CANCEL || operation == IEC_FILE_OPERATION_WRITE) &&
+        result_callback != nullptr) {
+        iec_file_operation_result_t result{};
+        result.transfer_id = transfer_id;
+        result.operation = operation;
+        result.direction = transfer_snapshot.direction;
+        result.result = result_code;
+        result.common_address = common_address;
+        result.directory_name = transfer_snapshot.directory_name.c_str();
+        result.file_name = transfer_snapshot.file_name.c_str();
+        result.final_offset = transfer_snapshot.acknowledged_offset;
+        result.total_size = transfer_snapshot.total_size;
+        result.cause_of_transmission = cause;
+        result.is_final = is_final ? 1U : 0U;
+        result_callback(session, &result, user_context);
+    }
+}
+
 void dispatch_point_indications(
     iec_session_t *session,
     const uint8_t *payload,
@@ -1239,6 +1636,9 @@ void receive_worker(iec_session_t *session) noexcept
         iec_on_clock_result_fn clock_callback = nullptr;
         iec_on_parameter_indication_fn parameter_indication_callback = nullptr;
         iec_on_parameter_result_fn parameter_result_callback = nullptr;
+        iec_on_file_list_indication_fn file_list_callback = nullptr;
+        iec_on_file_data_indication_fn file_data_callback = nullptr;
+        iec_on_file_operation_result_fn file_result_callback = nullptr;
         void *user_context = nullptr;
         uint32_t recv_timeout_ms = 50;
         uint32_t max_frame_len = 0;
@@ -1257,6 +1657,9 @@ void receive_worker(iec_session_t *session) noexcept
             clock_callback = session->callbacks.on_clock_result;
             parameter_indication_callback = session->callbacks.on_parameter_indication;
             parameter_result_callback = session->callbacks.on_parameter_result;
+            file_list_callback = session->callbacks.on_file_list_indication;
+            file_data_callback = session->callbacks.on_file_data_indication;
+            file_result_callback = session->callbacks.on_file_operation_result;
             user_context = session->config.user_context;
             recv_timeout_ms = std::min<uint32_t>(session->config.command_timeout_ms, 50U);
             if (recv_timeout_ms == 0) {
@@ -1325,6 +1728,15 @@ void receive_worker(iec_session_t *session) noexcept
             layout,
             parameter_indication_callback,
             parameter_result_callback,
+            user_context);
+        dispatch_file_messages(
+            session,
+            buffer.data(),
+            received,
+            layout,
+            file_list_callback,
+            file_data_callback,
+            file_result_callback,
             user_context);
     }
 }
@@ -2359,6 +2771,423 @@ iec_status_t switch_setting_group(
         request->target_group,
         IEC_PARAMETER_OPERATION_SWITCH_GROUP,
         out_request_id);
+}
+
+namespace {
+
+bool begin_file_frame(
+    iec_session_t *session,
+    iec_file_operation_t operation,
+    uint16_t common_address,
+    uint8_t flags,
+    uint8_t *frame,
+    uint32_t &frame_size,
+    AsduLayout &layout) noexcept
+{
+    std::lock_guard<std::mutex> lock(session->mutex);
+    layout = get_asdu_layout(*session);
+    if (layout.cot_length == 0 || layout.common_address_length == 0 ||
+        layout.information_object_address_length == 0 ||
+        !fits_uint_le(common_address, layout.common_address_length)) {
+        return false;
+    }
+
+    const uint8_t type_id = file_type_id(operation);
+    if (type_id == 0) {
+        return false;
+    }
+
+    frame[frame_size++] = type_id;
+    frame[frame_size++] = 1;
+    write_uint_le(frame, frame_size, operation == IEC_FILE_OPERATION_LIST ? kCauseRequest : kCauseActivation, 1);
+    if (layout.cot_length == 2) {
+        write_uint_le(frame, frame_size, kDefaultOriginatorAddress, 1);
+    }
+    write_uint_le(frame, frame_size, common_address, layout.common_address_length);
+    write_uint_le(frame, frame_size, kFileChannelInformationObjectAddress, layout.information_object_address_length);
+    frame[frame_size++] = flags;
+    frame[frame_size++] = 0;
+    return true;
+}
+
+iec_status_t send_file_frame(
+    iec_session_t *session,
+    const uint8_t *frame,
+    uint32_t frame_size,
+    uint32_t id,
+    bool is_transfer,
+    uint32_t *out_id) noexcept
+{
+    iec_transport_t transport{};
+    iec_on_raw_asdu_fn raw_callback = nullptr;
+    void *user_context = nullptr;
+    uint32_t timeout_ms = 0;
+    bool raw_enabled = false;
+    AsduLayout layout{};
+
+    {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        if (session->state != IEC_RUNTIME_RUNNING) {
+            return IEC_STATUS_BAD_STATE;
+        }
+        if (frame_size > session->transport.max_plain_frame_len) {
+            return IEC_STATUS_INVALID_ARGUMENT;
+        }
+        transport = session->transport;
+        raw_callback = session->callbacks.on_raw_asdu;
+        user_context = session->config.user_context;
+        timeout_ms = session->config.command_timeout_ms;
+        raw_enabled = session->config.enable_raw_asdu != 0;
+        layout = get_asdu_layout(*session);
+    }
+
+    const int send_result = transport.send(transport.ctx, frame, frame_size, timeout_ms);
+    if (send_result != 0) {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        if (is_transfer) {
+            auto match = std::find_if(
+                session->file_transfers.begin(),
+                session->file_transfers.end(),
+                [id](const iec_session_t::FileTransfer &transfer) {
+                    return transfer.transfer_id == id;
+                });
+            if (match != session->file_transfers.end()) {
+                session->file_transfers.erase(match);
+            }
+        } else {
+            auto match = std::find_if(
+                session->pending_file_lists.begin(),
+                session->pending_file_lists.end(),
+                [id](const iec_session_t::PendingFileList &pending) {
+                    return pending.request_id == id;
+                });
+            if (match != session->pending_file_lists.end()) {
+                session->pending_file_lists.erase(match);
+            }
+        }
+        return IEC_STATUS_IO_ERROR;
+    }
+
+    *out_id = id;
+
+    if (raw_enabled) {
+        notify_raw_asdu(
+            session,
+            IEC_RAW_ASDU_TX,
+            frame,
+            frame_size,
+            layout,
+            raw_callback,
+            user_context);
+    }
+
+    return IEC_STATUS_OK;
+}
+
+} // namespace
+
+iec_status_t list_files(
+    iec_session_t *session,
+    const iec_file_list_request_t *request,
+    uint32_t *out_request_id) noexcept
+{
+    if (out_request_id != nullptr) {
+        *out_request_id = 0;
+    }
+    if (session == nullptr || request == nullptr || out_request_id == nullptr ||
+        !is_binary_flag(request->include_details) ||
+        !is_non_empty_bounded_string(request->directory_name, kMaxFileNameBytes)) {
+        return IEC_STATUS_INVALID_ARGUMENT;
+    }
+
+    uint8_t frame[192]{};
+    uint32_t frame_size = 0;
+    AsduLayout layout{};
+    if (!begin_file_frame(
+            session,
+            IEC_FILE_OPERATION_LIST,
+            request->common_address,
+            static_cast<uint8_t>(request->include_details != 0 ? 0x02U : 0U),
+            frame,
+            frame_size,
+            layout) ||
+        !append_string_field(frame, frame_size, sizeof(frame), request->directory_name, kMaxFileNameBytes)) {
+        return IEC_STATUS_INVALID_ARGUMENT;
+    }
+
+    uint32_t request_id = 0;
+    {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        if (session->state != IEC_RUNTIME_RUNNING) {
+            return IEC_STATUS_BAD_STATE;
+        }
+        request_id = take_next_request_id(*session);
+        session->pending_file_lists.push_back(iec_session_t::PendingFileList{
+            request_id,
+            request->common_address,
+            request->directory_name,
+        });
+    }
+
+    return send_file_frame(session, frame, frame_size, request_id, false, out_request_id);
+}
+
+iec_status_t read_file(
+    iec_session_t *session,
+    const iec_file_read_request_t *request,
+    uint32_t *out_transfer_id) noexcept
+{
+    if (out_transfer_id != nullptr) {
+        *out_transfer_id = 0;
+    }
+    if (session == nullptr || request == nullptr || out_transfer_id == nullptr ||
+        !is_non_empty_bounded_string(request->directory_name, kMaxFileNameBytes) ||
+        !is_non_empty_bounded_string(request->file_name, kMaxFileNameBytes)) {
+        return IEC_STATUS_INVALID_ARGUMENT;
+    }
+
+    uint8_t frame[512]{};
+    uint32_t frame_size = 0;
+    AsduLayout layout{};
+    if (!begin_file_frame(session, IEC_FILE_OPERATION_READ, request->common_address, 0, frame, frame_size, layout) ||
+        !append_string_field(frame, frame_size, sizeof(frame), request->directory_name, kMaxFileNameBytes) ||
+        !append_string_field(frame, frame_size, sizeof(frame), request->file_name, kMaxFileNameBytes)) {
+        return IEC_STATUS_INVALID_ARGUMENT;
+    }
+
+    uint32_t transfer_id = 0;
+    uint32_t chunk_size = 0;
+    {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        if (session->state != IEC_RUNTIME_RUNNING) {
+            return IEC_STATUS_BAD_STATE;
+        }
+        chunk_size = effective_file_chunk_size(*session, request->max_chunk_size);
+        if (chunk_size == 0 || !fits_uint_le(request->common_address, layout.common_address_length)) {
+            return IEC_STATUS_INVALID_ARGUMENT;
+        }
+        transfer_id = take_next_transfer_id(*session);
+        session->file_transfers.push_back(iec_session_t::FileTransfer{
+            transfer_id,
+            IEC_FILE_TRANSFER_DIRECTION_READ,
+            IEC_FILE_TRANSFER_STATE_ACCEPTED,
+            request->common_address,
+            request->directory_name,
+            request->file_name,
+            request->expected_file_size,
+            request->start_offset,
+            1,
+            IEC_FILE_RESULT_ACCEPTED,
+            0,
+            0,
+        });
+    }
+
+    write_uint_le(frame, frame_size, transfer_id, 4);
+    write_uint_le(frame, frame_size, request->start_offset, 4);
+    write_uint_le(frame, frame_size, chunk_size, 4);
+    write_uint_le(frame, frame_size, request->expected_file_size, 4);
+
+    return send_file_frame(session, frame, frame_size, transfer_id, true, out_transfer_id);
+}
+
+iec_status_t write_file(
+    iec_session_t *session,
+    const iec_file_write_request_t *request,
+    uint32_t *out_transfer_id) noexcept
+{
+    if (out_transfer_id != nullptr) {
+        *out_transfer_id = 0;
+    }
+    if (session == nullptr || request == nullptr || out_transfer_id == nullptr ||
+        !is_binary_flag(request->overwrite_existing) ||
+        !is_non_empty_bounded_string(request->directory_name, kMaxFileNameBytes) ||
+        !is_non_empty_bounded_string(request->file_name, kMaxFileNameBytes) ||
+        request->content == nullptr || request->content_size == 0 ||
+        request->start_offset > request->total_size ||
+        request->content_size > request->total_size - request->start_offset) {
+        return IEC_STATUS_INVALID_ARGUMENT;
+    }
+
+    uint8_t frame[1536]{};
+    uint32_t frame_size = 0;
+    AsduLayout layout{};
+    if (!begin_file_frame(
+            session,
+            IEC_FILE_OPERATION_WRITE,
+            request->common_address,
+            request->overwrite_existing != 0 ? 0x02U : 0U,
+            frame,
+            frame_size,
+            layout) ||
+        !append_string_field(frame, frame_size, sizeof(frame), request->directory_name, kMaxFileNameBytes) ||
+        !append_string_field(frame, frame_size, sizeof(frame), request->file_name, kMaxFileNameBytes)) {
+        return IEC_STATUS_INVALID_ARGUMENT;
+    }
+
+    uint32_t transfer_id = 0;
+    uint32_t chunk_size = 0;
+    {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        if (session->state != IEC_RUNTIME_RUNNING) {
+            return IEC_STATUS_BAD_STATE;
+        }
+        chunk_size = effective_file_chunk_size(*session, request->preferred_chunk_size);
+        if (chunk_size == 0 || request->content_size > chunk_size ||
+            frame_size + 20U + request->content_size > session->transport.max_plain_frame_len) {
+            return IEC_STATUS_INVALID_ARGUMENT;
+        }
+        transfer_id = take_next_transfer_id(*session);
+        session->file_transfers.push_back(iec_session_t::FileTransfer{
+            transfer_id,
+            IEC_FILE_TRANSFER_DIRECTION_WRITE,
+            IEC_FILE_TRANSFER_STATE_ACCEPTED,
+            request->common_address,
+            request->directory_name,
+            request->file_name,
+            request->total_size,
+            request->start_offset,
+            1,
+            IEC_FILE_RESULT_ACCEPTED,
+            0,
+            0,
+        });
+    }
+
+    write_uint_le(frame, frame_size, transfer_id, 4);
+    write_uint_le(frame, frame_size, request->start_offset, 4);
+    write_uint_le(frame, frame_size, request->total_size, 4);
+    write_uint_le(frame, frame_size, chunk_size, 4);
+    write_uint_le(frame, frame_size, request->content_size, 4);
+    std::memcpy(frame + frame_size, request->content, request->content_size);
+    frame_size += request->content_size;
+
+    return send_file_frame(session, frame, frame_size, transfer_id, true, out_transfer_id);
+}
+
+iec_status_t get_file_transfer_status(
+    const iec_session_t *session,
+    uint32_t transfer_id,
+    iec_file_transfer_status_t *out_status) noexcept
+{
+    if (out_status != nullptr) {
+        *out_status = iec_file_transfer_status_t{};
+    }
+    if (session == nullptr || transfer_id == 0 || out_status == nullptr) {
+        return IEC_STATUS_INVALID_ARGUMENT;
+    }
+
+    std::lock_guard<std::mutex> lock(session->mutex);
+    auto match = std::find_if(
+        session->file_transfers.begin(),
+        session->file_transfers.end(),
+        [transfer_id](const iec_session_t::FileTransfer &transfer) {
+            return transfer.transfer_id == transfer_id;
+        });
+    if (match == session->file_transfers.end()) {
+        return IEC_STATUS_INVALID_ARGUMENT;
+    }
+
+    out_status->transfer_id = match->transfer_id;
+    out_status->direction = match->direction;
+    out_status->state = match->state;
+    out_status->common_address = match->common_address;
+    out_status->directory_name = match->directory_name.c_str();
+    out_status->file_name = match->file_name.c_str();
+    out_status->total_size = match->total_size;
+    out_status->acknowledged_offset = match->acknowledged_offset;
+    out_status->is_resumable = match->is_resumable;
+    out_status->last_result = match->last_result;
+    out_status->last_cause_of_transmission = match->last_cause_of_transmission;
+    out_status->last_native_error_code = match->last_native_error_code;
+    return IEC_STATUS_OK;
+}
+
+iec_status_t cancel_file_transfer(iec_session_t *session, uint32_t transfer_id) noexcept
+{
+    if (session == nullptr || transfer_id == 0) {
+        return IEC_STATUS_INVALID_ARGUMENT;
+    }
+
+    uint8_t frame[32]{};
+    uint32_t frame_size = 0;
+    AsduLayout layout{};
+    iec_session_t::FileTransfer transfer_snapshot{};
+    iec_on_file_operation_result_fn result_callback = nullptr;
+    void *user_context = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        if (session->state != IEC_RUNTIME_RUNNING) {
+            return IEC_STATUS_BAD_STATE;
+        }
+        auto match = std::find_if(
+            session->file_transfers.begin(),
+            session->file_transfers.end(),
+            [transfer_id](const iec_session_t::FileTransfer &transfer) {
+                return transfer.transfer_id == transfer_id;
+            });
+        if (match == session->file_transfers.end()) {
+            return IEC_STATUS_INVALID_ARGUMENT;
+        }
+        if (match->state == IEC_FILE_TRANSFER_STATE_COMPLETED ||
+            match->state == IEC_FILE_TRANSFER_STATE_CANCELED) {
+            return IEC_STATUS_BAD_STATE;
+        }
+        transfer_snapshot = *match;
+    }
+
+    if (!begin_file_frame(
+            session,
+            IEC_FILE_OPERATION_CANCEL,
+            transfer_snapshot.common_address,
+            0,
+            frame,
+            frame_size,
+            layout)) {
+        return IEC_STATUS_INVALID_ARGUMENT;
+    }
+    write_uint_le(frame, frame_size, transfer_id, 4);
+
+    uint32_t ignored_id = 0;
+    const iec_status_t send_status = send_file_frame(session, frame, frame_size, 0, false, &ignored_id);
+    if (send_status != IEC_STATUS_OK) {
+        return send_status;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        auto match = std::find_if(
+            session->file_transfers.begin(),
+            session->file_transfers.end(),
+            [transfer_id](const iec_session_t::FileTransfer &transfer) {
+                return transfer.transfer_id == transfer_id;
+            });
+        if (match != session->file_transfers.end()) {
+            match->state = IEC_FILE_TRANSFER_STATE_CANCELED;
+            match->is_resumable = 0;
+            match->last_result = IEC_FILE_RESULT_CANCELED;
+            transfer_snapshot = *match;
+        }
+        result_callback = session->callbacks.on_file_operation_result;
+        user_context = session->config.user_context;
+    }
+
+    if (result_callback != nullptr) {
+        iec_file_operation_result_t result{};
+        result.transfer_id = transfer_id;
+        result.operation = IEC_FILE_OPERATION_CANCEL;
+        result.direction = transfer_snapshot.direction;
+        result.result = IEC_FILE_RESULT_CANCELED;
+        result.common_address = transfer_snapshot.common_address;
+        result.directory_name = transfer_snapshot.directory_name.c_str();
+        result.file_name = transfer_snapshot.file_name.c_str();
+        result.final_offset = transfer_snapshot.acknowledged_offset;
+        result.total_size = transfer_snapshot.total_size;
+        result.is_final = 1;
+        result_callback(session, &result, user_context);
+    }
+
+    return IEC_STATUS_OK;
 }
 
 iec_status_t set_option(iec_session_t *session, iec_option_t option, const void *value, uint32_t value_size) noexcept

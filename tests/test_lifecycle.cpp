@@ -245,6 +245,35 @@ struct StateRecorder {
 
     std::vector<ParameterResultEvent> parameter_results;
 
+    struct FileListEvent {
+        iec_file_list_indication_t indication{};
+        std::string directory_name;
+        std::vector<iec_file_entry_t> entries;
+        std::vector<std::string> entry_directories;
+        std::vector<std::string> entry_names;
+        std::vector<std::string> checksums;
+    };
+
+    std::vector<FileListEvent> file_lists;
+
+    struct FileDataEvent {
+        iec_file_data_indication_t indication{};
+        std::string directory_name;
+        std::string file_name;
+        std::vector<uint8_t> data;
+    };
+
+    std::vector<FileDataEvent> file_data;
+
+    struct FileResultEvent {
+        iec_file_operation_result_t result{};
+        std::string directory_name;
+        std::string file_name;
+        std::string detail_message;
+    };
+
+    std::vector<FileResultEvent> file_results;
+
     void record(iec_runtime_state_t state)
     {
         {
@@ -285,6 +314,91 @@ struct StateRecorder {
         {
             std::lock_guard<std::mutex> lock(mutex);
             parameter_results.push_back(ParameterResultEvent{result});
+        }
+        cv.notify_all();
+    }
+
+    void record_file_list(const iec_file_list_indication_t &indication)
+    {
+        FileListEvent snapshot{};
+        snapshot.indication = indication;
+        if (indication.directory_name != nullptr) {
+            snapshot.directory_name = indication.directory_name;
+            snapshot.indication.directory_name = snapshot.directory_name.c_str();
+        }
+        if (indication.entries != nullptr && indication.entry_count > 0) {
+            snapshot.entries.assign(indication.entries, indication.entries + indication.entry_count);
+            snapshot.entry_directories.resize(indication.entry_count);
+            snapshot.entry_names.resize(indication.entry_count);
+            snapshot.checksums.resize(indication.entry_count);
+            for (uint32_t i = 0; i < indication.entry_count; ++i) {
+                if (indication.entries[i].directory_name != nullptr) {
+                    snapshot.entry_directories[i] = indication.entries[i].directory_name;
+                    snapshot.entries[i].directory_name = snapshot.entry_directories[i].c_str();
+                }
+                if (indication.entries[i].file_name != nullptr) {
+                    snapshot.entry_names[i] = indication.entries[i].file_name;
+                    snapshot.entries[i].file_name = snapshot.entry_names[i].c_str();
+                }
+                if (indication.entries[i].checksum_text != nullptr) {
+                    snapshot.checksums[i] = indication.entries[i].checksum_text;
+                    snapshot.entries[i].checksum_text = snapshot.checksums[i].c_str();
+                }
+            }
+            snapshot.indication.entries = snapshot.entries.data();
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            file_lists.push_back(std::move(snapshot));
+        }
+        cv.notify_all();
+    }
+
+    void record_file_data(const iec_file_data_indication_t &indication)
+    {
+        FileDataEvent snapshot{};
+        snapshot.indication = indication;
+        if (indication.directory_name != nullptr) {
+            snapshot.directory_name = indication.directory_name;
+            snapshot.indication.directory_name = snapshot.directory_name.c_str();
+        }
+        if (indication.file_name != nullptr) {
+            snapshot.file_name = indication.file_name;
+            snapshot.indication.file_name = snapshot.file_name.c_str();
+        }
+        if (indication.data != nullptr && indication.data_size > 0) {
+            snapshot.data.assign(indication.data, indication.data + indication.data_size);
+            snapshot.indication.data = snapshot.data.data();
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            file_data.push_back(std::move(snapshot));
+        }
+        cv.notify_all();
+    }
+
+    void record_file_result(const iec_file_operation_result_t &result)
+    {
+        FileResultEvent snapshot{};
+        snapshot.result = result;
+        if (result.directory_name != nullptr) {
+            snapshot.directory_name = result.directory_name;
+            snapshot.result.directory_name = snapshot.directory_name.c_str();
+        }
+        if (result.file_name != nullptr) {
+            snapshot.file_name = result.file_name;
+            snapshot.result.file_name = snapshot.file_name.c_str();
+        }
+        if (result.detail_message != nullptr) {
+            snapshot.detail_message = result.detail_message;
+            snapshot.result.detail_message = snapshot.detail_message.c_str();
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            file_results.push_back(std::move(snapshot));
         }
         cv.notify_all();
     }
@@ -369,6 +483,24 @@ struct StateRecorder {
         return parameter_results;
     }
 
+    std::vector<FileListEvent> file_list_snapshot() const
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        return file_lists;
+    }
+
+    std::vector<FileDataEvent> file_data_snapshot() const
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        return file_data;
+    }
+
+    std::vector<FileResultEvent> file_result_snapshot() const
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        return file_results;
+    }
+
     bool wait_until_contains(iec_runtime_state_t state)
     {
         std::unique_lock<std::mutex> lock(mutex);
@@ -414,6 +546,30 @@ struct StateRecorder {
         std::unique_lock<std::mutex> lock(mutex);
         return cv.wait_for(lock, kStateWaitTimeout, [&] {
             return parameter_results.size() >= count;
+        });
+    }
+
+    bool wait_until_file_list_count(std::size_t count)
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        return cv.wait_for(lock, kStateWaitTimeout, [&] {
+            return file_lists.size() >= count;
+        });
+    }
+
+    bool wait_until_file_data_count(std::size_t count)
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        return cv.wait_for(lock, kStateWaitTimeout, [&] {
+            return file_data.size() >= count;
+        });
+    }
+
+    bool wait_until_file_result_count(std::size_t count)
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        return cv.wait_for(lock, kStateWaitTimeout, [&] {
+            return file_results.size() >= count;
         });
     }
 };
@@ -495,6 +651,45 @@ void on_parameter_result(iec_session_t *session, const iec_parameter_result_t *r
     recorder->record_parameter_result(*result);
 }
 
+void on_file_list_indication(
+    iec_session_t *session,
+    const iec_file_list_indication_t *indication,
+    void *user_context)
+{
+    (void)session;
+    auto *recorder = static_cast<StateRecorder *>(user_context);
+    if (recorder == nullptr || indication == nullptr) {
+        return;
+    }
+    recorder->record_file_list(*indication);
+}
+
+void on_file_data_indication(
+    iec_session_t *session,
+    const iec_file_data_indication_t *indication,
+    void *user_context)
+{
+    (void)session;
+    auto *recorder = static_cast<StateRecorder *>(user_context);
+    if (recorder == nullptr || indication == nullptr) {
+        return;
+    }
+    recorder->record_file_data(*indication);
+}
+
+void on_file_operation_result(
+    iec_session_t *session,
+    const iec_file_operation_result_t *result,
+    void *user_context)
+{
+    (void)session;
+    auto *recorder = static_cast<StateRecorder *>(user_context);
+    if (recorder == nullptr || result == nullptr) {
+        return;
+    }
+    recorder->record_file_result(*result);
+}
+
 iec_session_config_t make_common_config(StateRecorder &recorder)
 {
     iec_session_config_t config{};
@@ -529,6 +724,9 @@ iec_callbacks_t make_callbacks()
     callbacks.on_clock_result = on_clock_result;
     callbacks.on_parameter_indication = on_parameter_indication;
     callbacks.on_parameter_result = on_parameter_result;
+    callbacks.on_file_list_indication = on_file_list_indication;
+    callbacks.on_file_data_indication = on_file_data_indication;
+    callbacks.on_file_operation_result = on_file_operation_result;
     return callbacks;
 }
 
@@ -1672,6 +1870,237 @@ void exercise_parameters(
     std::printf("  %s parameters\n", name);
 }
 
+template <
+    typename Config,
+    typename CreateFn,
+    typename DestroyFn,
+    typename StartFn,
+    typename StopFn,
+    typename ListFilesFn,
+    typename ReadFileFn,
+    typename WriteFileFn,
+    typename GetFileTransferStatusFn,
+    typename CancelFileTransferFn>
+void exercise_file_transfer(
+    const char *name,
+    const Config &protocol_config,
+    CreateFn create,
+    DestroyFn destroy,
+    StartFn start,
+    StopFn stop,
+    ListFilesFn list_files,
+    ReadFileFn read_file,
+    WriteFileFn write_file,
+    GetFileTransferStatusFn get_file_transfer_status,
+    CancelFileTransferFn cancel_file_transfer)
+{
+    StateRecorder recorder;
+    MockTransport mock;
+    auto common = make_common_config(recorder);
+    auto transport = make_transport(mock);
+    transport.max_plain_frame_len = 512;
+    auto callbacks = make_callbacks();
+
+    iec_session_t *session = nullptr;
+    const iec_file_list_request_t list_request{1, "/cfg", 1};
+    const iec_file_read_request_t read_request{1, "/cfg", "terminal.xml", 4, 64, 16};
+    const uint8_t content[] = {0xaa, 0xbb, 0xcc, 0xdd};
+    const iec_file_write_request_t write_request{
+        1,
+        "/cfg",
+        "record.dat",
+        4,
+        16,
+        content,
+        static_cast<uint32_t>(sizeof(content)),
+        64,
+        1,
+    };
+
+    const std::vector<uint8_t> expected_list_request{
+        206, 1, 5, 0, 1, 0, 0, 0, 0, 2, 0, 4, '/', 'c', 'f', 'g',
+    };
+    const std::vector<uint8_t> expected_read_request{
+        207, 1, 6, 0, 1, 0, 0, 0, 0, 0, 0,
+        4, '/', 'c', 'f', 'g',
+        12, 't', 'e', 'r', 'm', 'i', 'n', 'a', 'l', '.', 'x', 'm', 'l',
+        1, 0, 0, 0,
+        4, 0, 0, 0,
+        64, 0, 0, 0,
+        16, 0, 0, 0,
+    };
+    const std::vector<uint8_t> expected_write_request{
+        208, 1, 6, 0, 1, 0, 0, 0, 0, 2, 0,
+        4, '/', 'c', 'f', 'g',
+        10, 'r', 'e', 'c', 'o', 'r', 'd', '.', 'd', 'a', 't',
+        2, 0, 0, 0,
+        4, 0, 0, 0,
+        16, 0, 0, 0,
+        64, 0, 0, 0,
+        4, 0, 0, 0,
+        0xaa, 0xbb, 0xcc, 0xdd,
+    };
+    const std::vector<uint8_t> expected_cancel_request{
+        209, 1, 6, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0,
+    };
+
+    const std::vector<uint8_t> list_response{
+        206, 1, 10, 0, 1, 0, 0, 0, 0, 1, 2,
+        4, '/', 'c', 'f', 'g',
+        1,
+        4, '/', 'c', 'f', 'g',
+        12, 't', 'e', 'r', 'm', 'i', 'n', 'a', 'l', '.', 'x', 'm', 'l',
+        16, 0, 0, 0,
+        0x88, 0x77, 0x66, 0x55,
+        0x44, 0x33, 0x22, 0x11,
+        0, 1,
+        3, 'm', 'd', '5',
+    };
+    const std::vector<uint8_t> read_response{
+        207, 1, 10, 0, 1, 0, 0, 0, 0, 1, 2,
+        1, 0, 0, 0,
+        4, 0, 0, 0,
+        8, 0, 0, 0,
+        16, 0, 0, 0,
+        4, 0, 0, 0,
+        1, 2, 3, 4,
+    };
+    const std::vector<uint8_t> write_response{
+        208, 1, 10, 0, 1, 0, 0, 0, 0, 1, 2,
+        2, 0, 0, 0,
+        8, 0, 0, 0,
+        16, 0, 0, 0,
+    };
+
+    uint32_t request_id = 99;
+    uint32_t transfer_id = 99;
+    iec_file_transfer_status_t status{};
+    EXPECT_STATUS(list_files(nullptr, &list_request, &request_id), IEC_STATUS_INVALID_ARGUMENT);
+    EXPECT_TRUE(request_id == 0);
+    EXPECT_STATUS(read_file(nullptr, &read_request, &transfer_id), IEC_STATUS_INVALID_ARGUMENT);
+    EXPECT_TRUE(transfer_id == 0);
+    EXPECT_STATUS(get_file_transfer_status(nullptr, 1, &status), IEC_STATUS_INVALID_ARGUMENT);
+    EXPECT_STATUS(cancel_file_transfer(nullptr, 1), IEC_STATUS_INVALID_ARGUMENT);
+    EXPECT_STATUS(create(&common, &protocol_config, &transport, &callbacks, &session), IEC_STATUS_OK);
+    EXPECT_TRUE(session != nullptr);
+
+    auto cleanup = [&] {
+        if (session != nullptr) {
+            (void)stop(session, 100);
+            (void)destroy(session);
+            session = nullptr;
+        }
+        close_transport(mock);
+    };
+
+    try {
+        auto invalid_list = list_request;
+        invalid_list.directory_name = "";
+        auto invalid_read = read_request;
+        invalid_read.file_name = nullptr;
+        auto invalid_write = write_request;
+        invalid_write.content_size = 0;
+
+        EXPECT_STATUS(list_files(session, nullptr, &request_id), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(list_files(session, &invalid_list, &request_id), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(read_file(session, &invalid_read, &transfer_id), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(write_file(session, &invalid_write, &transfer_id), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(get_file_transfer_status(session, 0, &status), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(cancel_file_transfer(session, 0), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(list_files(session, &list_request, &request_id), IEC_STATUS_BAD_STATE);
+        EXPECT_TRUE(request_id == 0);
+
+        EXPECT_STATUS(start(session), IEC_STATUS_OK);
+        EXPECT_TRUE(recorder.wait_until_contains(IEC_RUNTIME_RUNNING));
+
+        EXPECT_STATUS(list_files(session, &list_request, &request_id), IEC_STATUS_OK);
+        EXPECT_TRUE(request_id == 1);
+        EXPECT_TRUE(mock.last_sent == expected_list_request);
+        push_recv(mock, list_response);
+        EXPECT_TRUE(recorder.wait_until_file_list_count(1));
+        EXPECT_TRUE(recorder.wait_until_file_result_count(1));
+        const auto lists = recorder.file_list_snapshot();
+        EXPECT_TRUE(lists.size() == 1);
+        EXPECT_TRUE(lists[0].indication.request_id == 1);
+        EXPECT_TRUE(lists[0].directory_name == "/cfg");
+        EXPECT_TRUE(lists[0].indication.entry_count == 1);
+        EXPECT_TRUE(lists[0].entry_names[0] == "terminal.xml");
+        EXPECT_TRUE(lists[0].entries[0].file_size == 16);
+        EXPECT_TRUE(lists[0].entries[0].is_read_only == 1);
+        EXPECT_TRUE(lists[0].checksums[0] == "md5");
+
+        EXPECT_STATUS(read_file(session, &read_request, &transfer_id), IEC_STATUS_OK);
+        EXPECT_TRUE(transfer_id == 1);
+        EXPECT_TRUE(mock.last_sent == expected_read_request);
+        EXPECT_STATUS(get_file_transfer_status(session, transfer_id, &status), IEC_STATUS_OK);
+        EXPECT_TRUE(status.transfer_id == 1);
+        EXPECT_TRUE(status.direction == IEC_FILE_TRANSFER_DIRECTION_READ);
+        EXPECT_TRUE(status.state == IEC_FILE_TRANSFER_STATE_ACCEPTED);
+        EXPECT_TRUE(std::string(status.directory_name) == "/cfg");
+        EXPECT_TRUE(std::string(status.file_name) == "terminal.xml");
+        EXPECT_TRUE(status.acknowledged_offset == 4);
+
+        push_recv(mock, read_response);
+        EXPECT_TRUE(recorder.wait_until_file_data_count(1));
+        EXPECT_STATUS(get_file_transfer_status(session, transfer_id, &status), IEC_STATUS_OK);
+        EXPECT_TRUE(status.state == IEC_FILE_TRANSFER_STATE_COMPLETED);
+        EXPECT_TRUE(status.acknowledged_offset == 8);
+        const auto data = recorder.file_data_snapshot();
+        EXPECT_TRUE(data.size() == 1);
+        EXPECT_TRUE(data[0].indication.transfer_id == 1);
+        EXPECT_TRUE(data[0].indication.current_offset == 4);
+        EXPECT_TRUE(data[0].indication.next_offset == 8);
+        EXPECT_TRUE(data[0].data == std::vector<uint8_t>({1, 2, 3, 4}));
+
+        EXPECT_STATUS(write_file(session, &write_request, &transfer_id), IEC_STATUS_OK);
+        EXPECT_TRUE(transfer_id == 2);
+        EXPECT_TRUE(mock.last_sent == expected_write_request);
+        push_recv(mock, write_response);
+        EXPECT_TRUE(recorder.wait_until_file_result_count(3));
+        EXPECT_STATUS(get_file_transfer_status(session, transfer_id, &status), IEC_STATUS_OK);
+        EXPECT_TRUE(status.direction == IEC_FILE_TRANSFER_DIRECTION_WRITE);
+        EXPECT_TRUE(status.state == IEC_FILE_TRANSFER_STATE_COMPLETED);
+        EXPECT_TRUE(status.acknowledged_offset == 8);
+
+        const iec_file_read_request_t cancel_read{1, "/cfg", "cancel.bin", 0, 64, 32};
+        EXPECT_STATUS(read_file(session, &cancel_read, &transfer_id), IEC_STATUS_OK);
+        EXPECT_TRUE(transfer_id == 3);
+        EXPECT_STATUS(cancel_file_transfer(session, transfer_id), IEC_STATUS_OK);
+        auto expected_cancel_for_third = expected_cancel_request;
+        expected_cancel_for_third[11] = 3;
+        EXPECT_TRUE(mock.last_sent == expected_cancel_for_third);
+        EXPECT_TRUE(recorder.wait_until_file_result_count(4));
+        EXPECT_STATUS(get_file_transfer_status(session, transfer_id, &status), IEC_STATUS_OK);
+        EXPECT_TRUE(status.state == IEC_FILE_TRANSFER_STATE_CANCELED);
+        EXPECT_TRUE(status.last_result == IEC_FILE_RESULT_CANCELED);
+
+        const auto results = recorder.file_result_snapshot();
+        EXPECT_TRUE(results.size() == 4);
+        EXPECT_TRUE(results[0].result.request_id == 1);
+        EXPECT_TRUE(results[0].result.operation == IEC_FILE_OPERATION_LIST);
+        EXPECT_TRUE(results[0].result.result == IEC_FILE_RESULT_COMPLETED);
+        EXPECT_TRUE(results[1].result.transfer_id == 1);
+        EXPECT_TRUE(results[1].result.operation == IEC_FILE_OPERATION_READ);
+        EXPECT_TRUE(results[1].result.result == IEC_FILE_RESULT_COMPLETED);
+        EXPECT_TRUE(results[2].result.transfer_id == 2);
+        EXPECT_TRUE(results[2].result.operation == IEC_FILE_OPERATION_WRITE);
+        EXPECT_TRUE(results[2].result.result == IEC_FILE_RESULT_COMPLETED);
+        EXPECT_TRUE(results[3].result.transfer_id == 3);
+        EXPECT_TRUE(results[3].result.operation == IEC_FILE_OPERATION_CANCEL);
+        EXPECT_TRUE(results[3].result.result == IEC_FILE_RESULT_CANCELED);
+
+        EXPECT_STATUS(stop(session, 1000), IEC_STATUS_OK);
+        EXPECT_STATUS(destroy(session), IEC_STATUS_OK);
+        session = nullptr;
+        close_transport(mock);
+    } catch (...) {
+        cleanup();
+        throw;
+    }
+
+    std::printf("  %s file_transfer\n", name);
+}
+
 void test_iec101_validate_config()
 {
     auto valid = make_iec101_config();
@@ -1868,6 +2297,39 @@ void test_iec101_parameters()
         },
         [](iec_session_t *session, const iec_setting_group_request_t *request, uint32_t *out_request_id) {
             return iec101_switch_setting_group(session, request, out_request_id);
+        });
+}
+
+void test_iec101_file_transfer()
+{
+    const auto valid = make_iec101_config();
+    exercise_file_transfer(
+        "iec101",
+        valid,
+        [](const iec_session_config_t *common,
+           const iec101_master_config_t *config,
+           const iec_transport_t *transport,
+           const iec_callbacks_t *callbacks,
+           iec_session_t **out_session) {
+            return iec101_create(common, config, transport, callbacks, out_session);
+        },
+        [](iec_session_t *session) { return iec101_destroy(session); },
+        [](iec_session_t *session) { return iec101_start(session); },
+        [](iec_session_t *session, uint32_t timeout_ms) { return iec101_stop(session, timeout_ms); },
+        [](iec_session_t *session, const iec_file_list_request_t *request, uint32_t *out_request_id) {
+            return iec101_list_files(session, request, out_request_id);
+        },
+        [](iec_session_t *session, const iec_file_read_request_t *request, uint32_t *out_transfer_id) {
+            return iec101_read_file(session, request, out_transfer_id);
+        },
+        [](iec_session_t *session, const iec_file_write_request_t *request, uint32_t *out_transfer_id) {
+            return iec101_write_file(session, request, out_transfer_id);
+        },
+        [](const iec_session_t *session, uint32_t transfer_id, iec_file_transfer_status_t *out_status) {
+            return iec101_get_file_transfer_status(session, transfer_id, out_status);
+        },
+        [](iec_session_t *session, uint32_t transfer_id) {
+            return iec101_cancel_file_transfer(session, transfer_id);
         });
 }
 
@@ -2070,6 +2532,39 @@ void test_m101_parameters()
         });
 }
 
+void test_m101_file_transfer()
+{
+    const auto valid = make_m101_config();
+    exercise_file_transfer(
+        "m101",
+        valid,
+        [](const iec_session_config_t *common,
+           const m101_master_config_t *config,
+           const iec_transport_t *transport,
+           const iec_callbacks_t *callbacks,
+           iec_session_t **out_session) {
+            return m101_create(common, config, transport, callbacks, out_session);
+        },
+        [](iec_session_t *session) { return m101_destroy(session); },
+        [](iec_session_t *session) { return m101_start(session); },
+        [](iec_session_t *session, uint32_t timeout_ms) { return m101_stop(session, timeout_ms); },
+        [](iec_session_t *session, const iec_file_list_request_t *request, uint32_t *out_request_id) {
+            return m101_list_files(session, request, out_request_id);
+        },
+        [](iec_session_t *session, const iec_file_read_request_t *request, uint32_t *out_transfer_id) {
+            return m101_read_file(session, request, out_transfer_id);
+        },
+        [](iec_session_t *session, const iec_file_write_request_t *request, uint32_t *out_transfer_id) {
+            return m101_write_file(session, request, out_transfer_id);
+        },
+        [](const iec_session_t *session, uint32_t transfer_id, iec_file_transfer_status_t *out_status) {
+            return m101_get_file_transfer_status(session, transfer_id, out_status);
+        },
+        [](iec_session_t *session, uint32_t transfer_id) {
+            return m101_cancel_file_transfer(session, transfer_id);
+        });
+}
+
 void test_iec104_validate_config()
 {
     auto valid = make_iec104_config();
@@ -2269,6 +2764,39 @@ void test_iec104_parameters()
         });
 }
 
+void test_iec104_file_transfer()
+{
+    const auto valid = make_iec104_config();
+    exercise_file_transfer(
+        "iec104",
+        valid,
+        [](const iec_session_config_t *common,
+           const iec104_master_config_t *config,
+           const iec_transport_t *transport,
+           const iec_callbacks_t *callbacks,
+           iec_session_t **out_session) {
+            return iec104_create(common, config, transport, callbacks, out_session);
+        },
+        [](iec_session_t *session) { return iec104_destroy(session); },
+        [](iec_session_t *session) { return iec104_start(session); },
+        [](iec_session_t *session, uint32_t timeout_ms) { return iec104_stop(session, timeout_ms); },
+        [](iec_session_t *session, const iec_file_list_request_t *request, uint32_t *out_request_id) {
+            return iec104_list_files(session, request, out_request_id);
+        },
+        [](iec_session_t *session, const iec_file_read_request_t *request, uint32_t *out_transfer_id) {
+            return iec104_read_file(session, request, out_transfer_id);
+        },
+        [](iec_session_t *session, const iec_file_write_request_t *request, uint32_t *out_transfer_id) {
+            return iec104_write_file(session, request, out_transfer_id);
+        },
+        [](const iec_session_t *session, uint32_t transfer_id, iec_file_transfer_status_t *out_status) {
+            return iec104_get_file_transfer_status(session, transfer_id, out_status);
+        },
+        [](iec_session_t *session, uint32_t transfer_id) {
+            return iec104_cancel_file_transfer(session, transfer_id);
+        });
+}
+
 struct TestCase {
     const char *name;
     void (*run)();
@@ -2297,6 +2825,7 @@ int gw_protocol_run_lifecycle_tests(const char *filter)
         {"m101.read_point", test_m101_read_point},
         {"m101.clock", test_m101_clock},
         {"m101.parameters", test_m101_parameters},
+        {"m101.file_transfer", test_m101_file_transfer},
         {"iec101.validate_config", test_iec101_validate_config},
         {"iec101.lifecycle", test_iec101_lifecycle},
         {"iec101.raw_asdu", test_iec101_raw_asdu},
@@ -2306,6 +2835,7 @@ int gw_protocol_run_lifecycle_tests(const char *filter)
         {"iec101.read_point", test_iec101_read_point},
         {"iec101.clock", test_iec101_clock},
         {"iec101.parameters", test_iec101_parameters},
+        {"iec101.file_transfer", test_iec101_file_transfer},
         {"iec104.validate_config", test_iec104_validate_config},
         {"iec104.lifecycle", test_iec104_lifecycle},
         {"iec104.raw_asdu", test_iec104_raw_asdu},
@@ -2315,6 +2845,7 @@ int gw_protocol_run_lifecycle_tests(const char *filter)
         {"iec104.read_point", test_iec104_read_point},
         {"iec104.clock", test_iec104_clock},
         {"iec104.parameters", test_iec104_parameters},
+        {"iec104.file_transfer", test_iec104_file_transfer},
     };
 
     int failures = 0;

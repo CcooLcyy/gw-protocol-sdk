@@ -108,6 +108,45 @@ GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL iec104_switch_setting_group(
     return gw::protocol::switch_setting_group(session, request, out_request_id);
 }
 
+GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL iec104_list_files(
+    iec_session_t *session,
+    const iec_file_list_request_t *request,
+    uint32_t *out_request_id)
+{
+    return gw::protocol::list_files(session, request, out_request_id);
+}
+
+GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL iec104_read_file(
+    iec_session_t *session,
+    const iec_file_read_request_t *request,
+    uint32_t *out_transfer_id)
+{
+    return gw::protocol::read_file(session, request, out_transfer_id);
+}
+
+GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL iec104_write_file(
+    iec_session_t *session,
+    const iec_file_write_request_t *request,
+    uint32_t *out_transfer_id)
+{
+    return gw::protocol::write_file(session, request, out_transfer_id);
+}
+
+GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL iec104_get_file_transfer_status(
+    const iec_session_t *session,
+    uint32_t transfer_id,
+    iec_file_transfer_status_t *out_status)
+{
+    return gw::protocol::get_file_transfer_status(session, transfer_id, out_status);
+}
+
+GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL iec104_cancel_file_transfer(
+    iec_session_t *session,
+    uint32_t transfer_id)
+{
+    return gw::protocol::cancel_file_transfer(session, transfer_id);
+}
+
 GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL iec104_set_option(
     iec_session_t *session,
     iec_option_t option,

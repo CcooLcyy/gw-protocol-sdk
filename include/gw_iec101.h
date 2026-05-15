@@ -344,6 +344,130 @@ typedef struct iec_parameter_result {
     uint8_t is_final;
 } iec_parameter_result_t;
 
+typedef enum iec_file_operation {
+    IEC_FILE_OPERATION_LIST = 1,
+    IEC_FILE_OPERATION_READ = 2,
+    IEC_FILE_OPERATION_WRITE = 3,
+    IEC_FILE_OPERATION_CANCEL = 4
+} iec_file_operation_t;
+
+typedef enum iec_file_transfer_direction {
+    IEC_FILE_TRANSFER_DIRECTION_READ = 1,
+    IEC_FILE_TRANSFER_DIRECTION_WRITE = 2
+} iec_file_transfer_direction_t;
+
+typedef enum iec_file_transfer_state {
+    IEC_FILE_TRANSFER_STATE_ACCEPTED = 1,
+    IEC_FILE_TRANSFER_STATE_RUNNING = 2,
+    IEC_FILE_TRANSFER_STATE_COMPLETED = 3,
+    IEC_FILE_TRANSFER_STATE_CANCELED = 4,
+    IEC_FILE_TRANSFER_STATE_FAILED = 5
+} iec_file_transfer_state_t;
+
+typedef enum iec_file_result_code {
+    IEC_FILE_RESULT_ACCEPTED = 1,
+    IEC_FILE_RESULT_COMPLETED = 2,
+    IEC_FILE_RESULT_CANCELED = 3,
+    IEC_FILE_RESULT_REJECTED = 4,
+    IEC_FILE_RESULT_NEGATIVE_CONFIRM = 5,
+    IEC_FILE_RESULT_OFFSET_MISMATCH = 6,
+    IEC_FILE_RESULT_TIMEOUT = 7,
+    IEC_FILE_RESULT_PROTOCOL_ERROR = 8,
+    IEC_FILE_RESULT_NOT_FOUND = 9
+} iec_file_result_code_t;
+
+typedef struct iec_file_list_request {
+    uint16_t common_address;
+    const char *directory_name;
+    uint8_t include_details;
+} iec_file_list_request_t;
+
+typedef struct iec_file_entry {
+    const char *directory_name;
+    const char *file_name;
+    uint32_t file_size;
+    uint64_t modified_timestamp_ms;
+    uint8_t is_directory;
+    uint8_t is_read_only;
+    const char *checksum_text;
+} iec_file_entry_t;
+
+typedef struct iec_file_list_indication {
+    uint32_t request_id;
+    uint16_t common_address;
+    const char *directory_name;
+    const iec_file_entry_t *entries;
+    uint32_t entry_count;
+    uint8_t is_final;
+} iec_file_list_indication_t;
+
+typedef struct iec_file_read_request {
+    uint16_t common_address;
+    const char *directory_name;
+    const char *file_name;
+    uint32_t start_offset;
+    uint32_t max_chunk_size;
+    uint32_t expected_file_size;
+} iec_file_read_request_t;
+
+typedef struct iec_file_write_request {
+    uint16_t common_address;
+    const char *directory_name;
+    const char *file_name;
+    uint32_t start_offset;
+    uint32_t total_size;
+    const uint8_t *content;
+    uint32_t content_size;
+    uint32_t preferred_chunk_size;
+    uint8_t overwrite_existing;
+} iec_file_write_request_t;
+
+typedef struct iec_file_data_indication {
+    uint32_t transfer_id;
+    iec_file_transfer_direction_t direction;
+    uint16_t common_address;
+    const char *directory_name;
+    const char *file_name;
+    uint32_t total_size;
+    uint32_t current_offset;
+    uint32_t next_offset;
+    const uint8_t *data;
+    uint32_t data_size;
+    uint8_t is_final;
+} iec_file_data_indication_t;
+
+typedef struct iec_file_transfer_status {
+    uint32_t transfer_id;
+    iec_file_transfer_direction_t direction;
+    iec_file_transfer_state_t state;
+    uint16_t common_address;
+    const char *directory_name;
+    const char *file_name;
+    uint32_t total_size;
+    uint32_t acknowledged_offset;
+    uint8_t is_resumable;
+    iec_file_result_code_t last_result;
+    uint8_t last_cause_of_transmission;
+    int32_t last_native_error_code;
+} iec_file_transfer_status_t;
+
+typedef struct iec_file_operation_result {
+    uint32_t request_id;
+    uint32_t transfer_id;
+    iec_file_operation_t operation;
+    iec_file_transfer_direction_t direction;
+    iec_file_result_code_t result;
+    uint16_t common_address;
+    const char *directory_name;
+    const char *file_name;
+    uint32_t final_offset;
+    uint32_t total_size;
+    uint8_t cause_of_transmission;
+    int32_t native_error_code;
+    const char *detail_message;
+    uint8_t is_final;
+} iec_file_operation_result_t;
+
 typedef enum iec_raw_asdu_direction {
     IEC_RAW_ASDU_RX = 1,
     IEC_RAW_ASDU_TX = 2
@@ -448,6 +572,21 @@ typedef void(GW_PROTOCOL_CALL *iec_on_parameter_result_fn)(
     const iec_parameter_result_t *result,
     void *user_context);
 
+typedef void(GW_PROTOCOL_CALL *iec_on_file_list_indication_fn)(
+    iec_session_t *session,
+    const iec_file_list_indication_t *indication,
+    void *user_context);
+
+typedef void(GW_PROTOCOL_CALL *iec_on_file_data_indication_fn)(
+    iec_session_t *session,
+    const iec_file_data_indication_t *indication,
+    void *user_context);
+
+typedef void(GW_PROTOCOL_CALL *iec_on_file_operation_result_fn)(
+    iec_session_t *session,
+    const iec_file_operation_result_t *result,
+    void *user_context);
+
 typedef struct iec_callbacks {
     iec_on_session_state_fn on_session_state;
     iec_on_point_indication_fn on_point_indication;
@@ -456,6 +595,9 @@ typedef struct iec_callbacks {
     iec_on_clock_result_fn on_clock_result;
     iec_on_parameter_indication_fn on_parameter_indication;
     iec_on_parameter_result_fn on_parameter_result;
+    iec_on_file_list_indication_fn on_file_list_indication;
+    iec_on_file_data_indication_fn on_file_data_indication;
+    iec_on_file_operation_result_fn on_file_operation_result;
 } iec_callbacks_t;
 
 #ifdef __cplusplus
@@ -547,6 +689,25 @@ GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL iec101_switch_setting_group(
     iec_session_t *session,
     const iec_setting_group_request_t *request,
     uint32_t *out_request_id);
+GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL iec101_list_files(
+    iec_session_t *session,
+    const iec_file_list_request_t *request,
+    uint32_t *out_request_id);
+GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL iec101_read_file(
+    iec_session_t *session,
+    const iec_file_read_request_t *request,
+    uint32_t *out_transfer_id);
+GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL iec101_write_file(
+    iec_session_t *session,
+    const iec_file_write_request_t *request,
+    uint32_t *out_transfer_id);
+GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL iec101_get_file_transfer_status(
+    const iec_session_t *session,
+    uint32_t transfer_id,
+    iec_file_transfer_status_t *out_status);
+GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL iec101_cancel_file_transfer(
+    iec_session_t *session,
+    uint32_t transfer_id);
 GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL iec101_set_option(
     iec_session_t *session,
     iec_option_t option,

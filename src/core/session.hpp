@@ -60,6 +60,23 @@ iec_status_t switch_setting_group(
     iec_session_t *session,
     const iec_setting_group_request_t *request,
     uint32_t *out_request_id) noexcept;
+iec_status_t list_files(
+    iec_session_t *session,
+    const iec_file_list_request_t *request,
+    uint32_t *out_request_id) noexcept;
+iec_status_t read_file(
+    iec_session_t *session,
+    const iec_file_read_request_t *request,
+    uint32_t *out_transfer_id) noexcept;
+iec_status_t write_file(
+    iec_session_t *session,
+    const iec_file_write_request_t *request,
+    uint32_t *out_transfer_id) noexcept;
+iec_status_t get_file_transfer_status(
+    const iec_session_t *session,
+    uint32_t transfer_id,
+    iec_file_transfer_status_t *out_status) noexcept;
+iec_status_t cancel_file_transfer(iec_session_t *session, uint32_t transfer_id) noexcept;
 iec_status_t set_option(iec_session_t *session, iec_option_t option, const void *value, uint32_t value_size) noexcept;
 iec_status_t send_raw_asdu(iec_session_t *session, const iec_raw_asdu_tx_t *request) noexcept;
 iec_status_t start_session(iec_session_t *session) noexcept;
