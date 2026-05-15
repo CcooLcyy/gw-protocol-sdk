@@ -66,6 +66,7 @@ if(BUILD_TESTING)
         m101.read_point
         m101.clock
         m101.parameters
+        m101.device_description
         m101.file_transfer
         iec101.validate_config
         iec101.lifecycle
@@ -76,6 +77,7 @@ if(BUILD_TESTING)
         iec101.read_point
         iec101.clock
         iec101.parameters
+        iec101.device_description
         iec101.file_transfer
         iec104.validate_config
         iec104.lifecycle
@@ -86,6 +88,7 @@ if(BUILD_TESTING)
         iec104.read_point
         iec104.clock
         iec104.parameters
+        iec104.device_description
         iec104.file_transfer
     )
     foreach(test_case IN LISTS gw_protocol_test_cases)

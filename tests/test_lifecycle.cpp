@@ -245,6 +245,13 @@ struct StateRecorder {
 
     std::vector<ParameterResultEvent> parameter_results;
 
+    struct DeviceDescriptionEvent {
+        iec_device_description_t description{};
+        std::vector<uint8_t> content;
+    };
+
+    std::vector<DeviceDescriptionEvent> device_descriptions;
+
     struct FileListEvent {
         iec_file_list_indication_t indication{};
         std::string directory_name;
@@ -314,6 +321,22 @@ struct StateRecorder {
         {
             std::lock_guard<std::mutex> lock(mutex);
             parameter_results.push_back(ParameterResultEvent{result});
+        }
+        cv.notify_all();
+    }
+
+    void record_device_description(const iec_device_description_t &description)
+    {
+        DeviceDescriptionEvent snapshot{};
+        snapshot.description = description;
+        if (description.content != nullptr && description.content_size > 0) {
+            snapshot.content.assign(description.content, description.content + description.content_size);
+            snapshot.description.content = snapshot.content.data();
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            device_descriptions.push_back(std::move(snapshot));
         }
         cv.notify_all();
     }
@@ -483,6 +506,12 @@ struct StateRecorder {
         return parameter_results;
     }
 
+    std::vector<DeviceDescriptionEvent> device_description_snapshot() const
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        return device_descriptions;
+    }
+
     std::vector<FileListEvent> file_list_snapshot() const
     {
         std::lock_guard<std::mutex> lock(mutex);
@@ -546,6 +575,14 @@ struct StateRecorder {
         std::unique_lock<std::mutex> lock(mutex);
         return cv.wait_for(lock, kStateWaitTimeout, [&] {
             return parameter_results.size() >= count;
+        });
+    }
+
+    bool wait_until_device_description_count(std::size_t count)
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        return cv.wait_for(lock, kStateWaitTimeout, [&] {
+            return device_descriptions.size() >= count;
         });
     }
 
@@ -651,6 +688,19 @@ void on_parameter_result(iec_session_t *session, const iec_parameter_result_t *r
     recorder->record_parameter_result(*result);
 }
 
+void on_device_description(
+    iec_session_t *session,
+    const iec_device_description_t *description,
+    void *user_context)
+{
+    (void)session;
+    auto *recorder = static_cast<StateRecorder *>(user_context);
+    if (recorder == nullptr || description == nullptr) {
+        return;
+    }
+    recorder->record_device_description(*description);
+}
+
 void on_file_list_indication(
     iec_session_t *session,
     const iec_file_list_indication_t *indication,
@@ -724,6 +774,7 @@ iec_callbacks_t make_callbacks()
     callbacks.on_clock_result = on_clock_result;
     callbacks.on_parameter_indication = on_parameter_indication;
     callbacks.on_parameter_result = on_parameter_result;
+    callbacks.on_device_description = on_device_description;
     callbacks.on_file_list_indication = on_file_list_indication;
     callbacks.on_file_data_indication = on_file_data_indication;
     callbacks.on_file_operation_result = on_file_operation_result;
@@ -1876,6 +1927,108 @@ template <
     typename DestroyFn,
     typename StartFn,
     typename StopFn,
+    typename GetDeviceDescriptionFn>
+void exercise_device_description(
+    const char *name,
+    const Config &protocol_config,
+    CreateFn create,
+    DestroyFn destroy,
+    StartFn start,
+    StopFn stop,
+    GetDeviceDescriptionFn get_device_description)
+{
+    StateRecorder recorder;
+    MockTransport mock;
+    auto common = make_common_config(recorder);
+    auto transport = make_transport(mock);
+    auto callbacks = make_callbacks();
+
+    iec_session_t *session = nullptr;
+    const iec_device_description_request_t request{
+        1,
+        IEC_DEVICE_DESCRIPTION_FORMAT_XML,
+        64,
+    };
+
+    const std::vector<uint8_t> expected_request{
+        210, 1, 5, 0, 1, 0, 0, 0, 0,
+        1, 0, 0, 0,
+        1,
+        64, 0, 0, 0,
+    };
+    const std::vector<uint8_t> response{
+        210, 1, 10, 0, 1, 0, 0, 0, 0,
+        1, 0, 0, 0,
+        1,
+        1,
+        4, 0, 0, 0,
+        '<', 'm', '/', '>',
+    };
+
+    uint32_t request_id = 99;
+    EXPECT_STATUS(get_device_description(nullptr, &request, &request_id), IEC_STATUS_INVALID_ARGUMENT);
+    EXPECT_TRUE(request_id == 0);
+    EXPECT_STATUS(create(&common, &protocol_config, &transport, &callbacks, &session), IEC_STATUS_OK);
+    EXPECT_TRUE(session != nullptr);
+
+    auto cleanup = [&] {
+        if (session != nullptr) {
+            (void)stop(session, 100);
+            (void)destroy(session);
+            session = nullptr;
+        }
+        close_transport(mock);
+    };
+
+    try {
+        auto invalid_format = request;
+        invalid_format.preferred_format = static_cast<iec_device_description_format_t>(99);
+        auto invalid_size = request;
+        invalid_size.max_content_size = 0;
+
+        EXPECT_STATUS(get_device_description(session, nullptr, &request_id), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(get_device_description(session, &request, nullptr), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(get_device_description(session, &invalid_format, &request_id), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(get_device_description(session, &invalid_size, &request_id), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(get_device_description(session, &request, &request_id), IEC_STATUS_BAD_STATE);
+        EXPECT_TRUE(request_id == 0);
+
+        EXPECT_STATUS(start(session), IEC_STATUS_OK);
+        EXPECT_TRUE(recorder.wait_until_contains(IEC_RUNTIME_RUNNING));
+
+        EXPECT_STATUS(get_device_description(session, &request, &request_id), IEC_STATUS_OK);
+        EXPECT_TRUE(request_id == 1);
+        EXPECT_TRUE(mock.last_sent == expected_request);
+
+        push_recv(mock, response);
+        EXPECT_TRUE(recorder.wait_until_device_description_count(1));
+        const auto descriptions = recorder.device_description_snapshot();
+        EXPECT_TRUE(descriptions.size() == 1);
+        EXPECT_TRUE(descriptions[0].description.request_id == 1);
+        EXPECT_TRUE(descriptions[0].description.common_address == 1);
+        EXPECT_TRUE(descriptions[0].description.format == IEC_DEVICE_DESCRIPTION_FORMAT_XML);
+        EXPECT_TRUE(descriptions[0].description.is_complete == 1);
+        EXPECT_TRUE(descriptions[0].description.content_size == 4);
+        EXPECT_TRUE(descriptions[0].content == std::vector<uint8_t>({'<', 'm', '/', '>'}));
+
+        EXPECT_STATUS(stop(session, 1000), IEC_STATUS_OK);
+        EXPECT_STATUS(destroy(session), IEC_STATUS_OK);
+        session = nullptr;
+        close_transport(mock);
+    } catch (...) {
+        cleanup();
+        throw;
+    }
+
+    std::printf("  %s device_description\n", name);
+}
+
+template <
+    typename Config,
+    typename CreateFn,
+    typename DestroyFn,
+    typename StartFn,
+    typename StopFn,
     typename ListFilesFn,
     typename ReadFileFn,
     typename WriteFileFn,
@@ -2300,6 +2453,27 @@ void test_iec101_parameters()
         });
 }
 
+void test_iec101_device_description()
+{
+    const auto valid = make_iec101_config();
+    exercise_device_description(
+        "iec101",
+        valid,
+        [](const iec_session_config_t *common,
+           const iec101_master_config_t *config,
+           const iec_transport_t *transport,
+           const iec_callbacks_t *callbacks,
+           iec_session_t **out_session) {
+            return iec101_create(common, config, transport, callbacks, out_session);
+        },
+        [](iec_session_t *session) { return iec101_destroy(session); },
+        [](iec_session_t *session) { return iec101_start(session); },
+        [](iec_session_t *session, uint32_t timeout_ms) { return iec101_stop(session, timeout_ms); },
+        [](iec_session_t *session, const iec_device_description_request_t *request, uint32_t *out_request_id) {
+            return iec101_get_device_description(session, request, out_request_id);
+        });
+}
+
 void test_iec101_file_transfer()
 {
     const auto valid = make_iec101_config();
@@ -2529,6 +2703,27 @@ void test_m101_parameters()
         },
         [](iec_session_t *session, const iec_setting_group_request_t *request, uint32_t *out_request_id) {
             return m101_switch_setting_group(session, request, out_request_id);
+        });
+}
+
+void test_m101_device_description()
+{
+    const auto valid = make_m101_config();
+    exercise_device_description(
+        "m101",
+        valid,
+        [](const iec_session_config_t *common,
+           const m101_master_config_t *config,
+           const iec_transport_t *transport,
+           const iec_callbacks_t *callbacks,
+           iec_session_t **out_session) {
+            return m101_create(common, config, transport, callbacks, out_session);
+        },
+        [](iec_session_t *session) { return m101_destroy(session); },
+        [](iec_session_t *session) { return m101_start(session); },
+        [](iec_session_t *session, uint32_t timeout_ms) { return m101_stop(session, timeout_ms); },
+        [](iec_session_t *session, const iec_device_description_request_t *request, uint32_t *out_request_id) {
+            return m101_get_device_description(session, request, out_request_id);
         });
 }
 
@@ -2764,6 +2959,27 @@ void test_iec104_parameters()
         });
 }
 
+void test_iec104_device_description()
+{
+    const auto valid = make_iec104_config();
+    exercise_device_description(
+        "iec104",
+        valid,
+        [](const iec_session_config_t *common,
+           const iec104_master_config_t *config,
+           const iec_transport_t *transport,
+           const iec_callbacks_t *callbacks,
+           iec_session_t **out_session) {
+            return iec104_create(common, config, transport, callbacks, out_session);
+        },
+        [](iec_session_t *session) { return iec104_destroy(session); },
+        [](iec_session_t *session) { return iec104_start(session); },
+        [](iec_session_t *session, uint32_t timeout_ms) { return iec104_stop(session, timeout_ms); },
+        [](iec_session_t *session, const iec_device_description_request_t *request, uint32_t *out_request_id) {
+            return iec104_get_device_description(session, request, out_request_id);
+        });
+}
+
 void test_iec104_file_transfer()
 {
     const auto valid = make_iec104_config();
@@ -2825,6 +3041,7 @@ int gw_protocol_run_lifecycle_tests(const char *filter)
         {"m101.read_point", test_m101_read_point},
         {"m101.clock", test_m101_clock},
         {"m101.parameters", test_m101_parameters},
+        {"m101.device_description", test_m101_device_description},
         {"m101.file_transfer", test_m101_file_transfer},
         {"iec101.validate_config", test_iec101_validate_config},
         {"iec101.lifecycle", test_iec101_lifecycle},
@@ -2835,6 +3052,7 @@ int gw_protocol_run_lifecycle_tests(const char *filter)
         {"iec101.read_point", test_iec101_read_point},
         {"iec101.clock", test_iec101_clock},
         {"iec101.parameters", test_iec101_parameters},
+        {"iec101.device_description", test_iec101_device_description},
         {"iec101.file_transfer", test_iec101_file_transfer},
         {"iec104.validate_config", test_iec104_validate_config},
         {"iec104.lifecycle", test_iec104_lifecycle},
@@ -2845,6 +3063,7 @@ int gw_protocol_run_lifecycle_tests(const char *filter)
         {"iec104.read_point", test_iec104_read_point},
         {"iec104.clock", test_iec104_clock},
         {"iec104.parameters", test_iec104_parameters},
+        {"iec104.device_description", test_iec104_device_description},
         {"iec104.file_transfer", test_iec104_file_transfer},
     };
 

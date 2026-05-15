@@ -344,6 +344,27 @@ typedef struct iec_parameter_result {
     uint8_t is_final;
 } iec_parameter_result_t;
 
+typedef enum iec_device_description_format {
+    IEC_DEVICE_DESCRIPTION_FORMAT_AUTO = 0,
+    IEC_DEVICE_DESCRIPTION_FORMAT_XML = 1,
+    IEC_DEVICE_DESCRIPTION_FORMAT_MSG = 2
+} iec_device_description_format_t;
+
+typedef struct iec_device_description_request {
+    uint16_t common_address;
+    iec_device_description_format_t preferred_format;
+    uint32_t max_content_size;
+} iec_device_description_request_t;
+
+typedef struct iec_device_description {
+    uint32_t request_id;
+    uint16_t common_address;
+    iec_device_description_format_t format;
+    const uint8_t *content;
+    uint32_t content_size;
+    uint8_t is_complete;
+} iec_device_description_t;
+
 typedef enum iec_file_operation {
     IEC_FILE_OPERATION_LIST = 1,
     IEC_FILE_OPERATION_READ = 2,
@@ -572,6 +593,11 @@ typedef void(GW_PROTOCOL_CALL *iec_on_parameter_result_fn)(
     const iec_parameter_result_t *result,
     void *user_context);
 
+typedef void(GW_PROTOCOL_CALL *iec_on_device_description_fn)(
+    iec_session_t *session,
+    const iec_device_description_t *description,
+    void *user_context);
+
 typedef void(GW_PROTOCOL_CALL *iec_on_file_list_indication_fn)(
     iec_session_t *session,
     const iec_file_list_indication_t *indication,
@@ -598,6 +624,7 @@ typedef struct iec_callbacks {
     iec_on_file_list_indication_fn on_file_list_indication;
     iec_on_file_data_indication_fn on_file_data_indication;
     iec_on_file_operation_result_fn on_file_operation_result;
+    iec_on_device_description_fn on_device_description;
 } iec_callbacks_t;
 
 #ifdef __cplusplus
@@ -669,6 +696,10 @@ GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL iec104_verify_parameters(
 GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL iec104_switch_setting_group(
     iec_session_t *session,
     const iec_setting_group_request_t *request,
+    uint32_t *out_request_id);
+GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL iec104_get_device_description(
+    iec_session_t *session,
+    const iec_device_description_request_t *request,
     uint32_t *out_request_id);
 GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL iec104_list_files(
     iec_session_t *session,

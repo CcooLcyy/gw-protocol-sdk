@@ -108,6 +108,14 @@ GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL iec104_switch_setting_group(
     return gw::protocol::switch_setting_group(session, request, out_request_id);
 }
 
+GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL iec104_get_device_description(
+    iec_session_t *session,
+    const iec_device_description_request_t *request,
+    uint32_t *out_request_id)
+{
+    return gw::protocol::get_device_description(session, request, out_request_id);
+}
+
 GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL iec104_list_files(
     iec_session_t *session,
     const iec_file_list_request_t *request,

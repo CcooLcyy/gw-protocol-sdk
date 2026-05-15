@@ -1,7 +1,7 @@
 # Release API export manifest.
 # Format: <target>:<symbol>
 #
-# Current implementation stage: lifecycle, configuration, interrogation, point read, clock, parameter, file transfer, and raw ASDU send APIs.
+# Current implementation stage: lifecycle, configuration, interrogation, point read, clock, parameter, device description, file transfer, and raw ASDU send APIs.
 
 # GW_m101 exports
 GW_m101:m101_create
@@ -19,6 +19,7 @@ GW_m101:m101_read_parameters
 GW_m101:m101_write_parameters
 GW_m101:m101_verify_parameters
 GW_m101:m101_switch_setting_group
+GW_m101:m101_get_device_description
 GW_m101:m101_list_files
 GW_m101:m101_read_file
 GW_m101:m101_write_file
@@ -44,6 +45,7 @@ GW_iec101:iec101_read_parameters
 GW_iec101:iec101_write_parameters
 GW_iec101:iec101_verify_parameters
 GW_iec101:iec101_switch_setting_group
+GW_iec101:iec101_get_device_description
 GW_iec101:iec101_list_files
 GW_iec101:iec101_read_file
 GW_iec101:iec101_write_file
@@ -69,6 +71,7 @@ GW_iec104:iec104_read_parameters
 GW_iec104:iec104_write_parameters
 GW_iec104:iec104_verify_parameters
 GW_iec104:iec104_switch_setting_group
+GW_iec104:iec104_get_device_description
 GW_iec104:iec104_list_files
 GW_iec104:iec104_read_file
 GW_iec104:iec104_write_file

@@ -60,6 +60,10 @@ iec_status_t switch_setting_group(
     iec_session_t *session,
     const iec_setting_group_request_t *request,
     uint32_t *out_request_id) noexcept;
+iec_status_t get_device_description(
+    iec_session_t *session,
+    const iec_device_description_request_t *request,
+    uint32_t *out_request_id) noexcept;
 iec_status_t list_files(
     iec_session_t *session,
     const iec_file_list_request_t *request,

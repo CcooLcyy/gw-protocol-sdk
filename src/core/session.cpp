@@ -38,6 +38,12 @@ struct iec_session {
         std::string directory_name;
     };
 
+    struct PendingDeviceDescription {
+        uint32_t request_id = 0;
+        uint16_t common_address = 0;
+        uint32_t max_content_size = 0;
+    };
+
     struct FileTransfer {
         uint32_t transfer_id = 0;
         iec_file_transfer_direction_t direction = IEC_FILE_TRANSFER_DIRECTION_READ;
@@ -64,6 +70,7 @@ struct iec_session {
     std::vector<PendingClock> pending_clocks;
     std::vector<PendingParameter> pending_parameters;
     std::vector<PendingFileList> pending_file_lists;
+    std::vector<PendingDeviceDescription> pending_device_descriptions;
     std::vector<FileTransfer> file_transfers;
     bool stop_requested = false;
     iec_runtime_state_t state = IEC_RUNTIME_CREATED;
@@ -112,6 +119,7 @@ constexpr uint8_t kAsduTypeFileList = 206;
 constexpr uint8_t kAsduTypeFileRead = 207;
 constexpr uint8_t kAsduTypeFileWrite = 208;
 constexpr uint8_t kAsduTypeFileCancel = 209;
+constexpr uint8_t kAsduTypeDeviceDescription = 210;
 constexpr uint8_t kCauseRequest = 5;
 constexpr uint8_t kCauseActivation = 6;
 constexpr uint8_t kCauseActivationConfirm = 7;
@@ -126,10 +134,12 @@ constexpr uint8_t kSelectExecuteQualifierMask = 0x80;
 constexpr uint32_t kClockSyncInformationObjectAddress = 0;
 constexpr uint32_t kParameterChannelInformationObjectAddress = 0;
 constexpr uint32_t kFileChannelInformationObjectAddress = 0;
+constexpr uint32_t kDeviceDescriptionInformationObjectAddress = 0;
 constexpr uint32_t kMaxParameterItemsPerRequest = 32;
 constexpr uint32_t kMaxParameterStringBytes = 64;
 constexpr uint32_t kMaxFileNameBytes = 128;
 constexpr uint32_t kMaxFileChunkBytes = 1024;
+constexpr uint32_t kMaxDeviceDescriptionContentBytes = 1024U * 1024U;
 
 bool is_link_mode_valid(iec101_link_mode_t mode) noexcept
 {
@@ -316,6 +326,18 @@ bool is_setting_group_action_valid(iec_setting_group_action_t action) noexcept
     switch (action) {
     case IEC_SETTING_GROUP_ACTION_GET_CURRENT:
     case IEC_SETTING_GROUP_ACTION_SWITCH:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool is_device_description_format_valid(iec_device_description_format_t format) noexcept
+{
+    switch (format) {
+    case IEC_DEVICE_DESCRIPTION_FORMAT_AUTO:
+    case IEC_DEVICE_DESCRIPTION_FORMAT_XML:
+    case IEC_DEVICE_DESCRIPTION_FORMAT_MSG:
         return true;
     default:
         return false;
@@ -1289,6 +1311,89 @@ void dispatch_parameter_messages(
     result_callback(session, &result, user_context);
 }
 
+void dispatch_device_description(
+    iec_session_t *session,
+    const uint8_t *payload,
+    uint32_t payload_size,
+    const AsduLayout &layout,
+    iec_on_device_description_fn callback,
+    void *user_context) noexcept
+{
+    if (payload == nullptr || payload_size < 2U + layout.cot_length +
+            layout.common_address_length + layout.information_object_address_length + 4U ||
+        payload[0] != kAsduTypeDeviceDescription || (payload[1] & 0x7FU) == 0) {
+        return;
+    }
+
+    const uint32_t cause_offset = 2U;
+    const uint8_t raw_cause = payload[cause_offset];
+    const uint8_t cause = static_cast<uint8_t>(raw_cause & 0x3FU);
+    const uint32_t common_address_offset = cause_offset + layout.cot_length;
+    const uint16_t common_address =
+        read_uint16_le(payload + common_address_offset, layout.common_address_length);
+    const uint32_t info_offset = common_address_offset + layout.common_address_length;
+    uint32_t offset = info_offset + layout.information_object_address_length;
+
+    const uint32_t request_id = read_uint32_le(payload + offset, 4);
+    offset += 4;
+
+    if ((raw_cause & 0x40U) != 0) {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        auto match = std::find_if(
+            session->pending_device_descriptions.begin(),
+            session->pending_device_descriptions.end(),
+            [request_id, common_address](const iec_session_t::PendingDeviceDescription &pending) {
+                return pending.request_id == request_id && pending.common_address == common_address;
+            });
+        if (match != session->pending_device_descriptions.end()) {
+            session->pending_device_descriptions.erase(match);
+        }
+        return;
+    }
+
+    if (payload_size < offset + 6U) {
+        return;
+    }
+
+    const auto format = static_cast<iec_device_description_format_t>(payload[offset++]);
+    const uint8_t flags = payload[offset++];
+    const uint32_t content_size = read_uint32_le(payload + offset, 4);
+    offset += 4;
+    if (!is_device_description_format_valid(format) || format == IEC_DEVICE_DESCRIPTION_FORMAT_AUTO ||
+        payload_size < offset + content_size) {
+        return;
+    }
+
+    const bool is_complete = (flags & 0x01U) != 0 || cause == kCauseActivationTermination;
+    {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        auto match = std::find_if(
+            session->pending_device_descriptions.begin(),
+            session->pending_device_descriptions.end(),
+            [request_id, common_address](const iec_session_t::PendingDeviceDescription &pending) {
+                return pending.request_id == request_id && pending.common_address == common_address;
+            });
+        if (match == session->pending_device_descriptions.end() ||
+            content_size > match->max_content_size) {
+            return;
+        }
+        if (is_complete) {
+            session->pending_device_descriptions.erase(match);
+        }
+    }
+
+    iec_device_description_t description{};
+    description.request_id = request_id;
+    description.common_address = common_address;
+    description.format = format;
+    description.content = content_size == 0 ? nullptr : payload + offset;
+    description.content_size = content_size;
+    description.is_complete = is_complete ? 1U : 0U;
+    if (callback != nullptr) {
+        callback(session, &description, user_context);
+    }
+}
+
 void dispatch_file_messages(
     iec_session_t *session,
     const uint8_t *payload,
@@ -1636,6 +1741,7 @@ void receive_worker(iec_session_t *session) noexcept
         iec_on_clock_result_fn clock_callback = nullptr;
         iec_on_parameter_indication_fn parameter_indication_callback = nullptr;
         iec_on_parameter_result_fn parameter_result_callback = nullptr;
+        iec_on_device_description_fn device_description_callback = nullptr;
         iec_on_file_list_indication_fn file_list_callback = nullptr;
         iec_on_file_data_indication_fn file_data_callback = nullptr;
         iec_on_file_operation_result_fn file_result_callback = nullptr;
@@ -1657,6 +1763,7 @@ void receive_worker(iec_session_t *session) noexcept
             clock_callback = session->callbacks.on_clock_result;
             parameter_indication_callback = session->callbacks.on_parameter_indication;
             parameter_result_callback = session->callbacks.on_parameter_result;
+            device_description_callback = session->callbacks.on_device_description;
             file_list_callback = session->callbacks.on_file_list_indication;
             file_data_callback = session->callbacks.on_file_data_indication;
             file_result_callback = session->callbacks.on_file_operation_result;
@@ -1728,6 +1835,13 @@ void receive_worker(iec_session_t *session) noexcept
             layout,
             parameter_indication_callback,
             parameter_result_callback,
+            user_context);
+        dispatch_device_description(
+            session,
+            buffer.data(),
+            received,
+            layout,
+            device_description_callback,
             user_context);
         dispatch_file_messages(
             session,
@@ -2771,6 +2885,108 @@ iec_status_t switch_setting_group(
         request->target_group,
         IEC_PARAMETER_OPERATION_SWITCH_GROUP,
         out_request_id);
+}
+
+iec_status_t get_device_description(
+    iec_session_t *session,
+    const iec_device_description_request_t *request,
+    uint32_t *out_request_id) noexcept
+{
+    if (out_request_id != nullptr) {
+        *out_request_id = 0;
+    }
+    if (session == nullptr || request == nullptr || out_request_id == nullptr ||
+        !is_device_description_format_valid(request->preferred_format) ||
+        request->max_content_size == 0 ||
+        request->max_content_size > kMaxDeviceDescriptionContentBytes) {
+        return IEC_STATUS_INVALID_ARGUMENT;
+    }
+
+    uint8_t frame[32]{};
+    uint32_t frame_size = 0;
+    uint32_t request_id = 0;
+    iec_transport_t transport{};
+    iec_on_raw_asdu_fn raw_callback = nullptr;
+    void *user_context = nullptr;
+    uint32_t timeout_ms = 0;
+    bool raw_enabled = false;
+    AsduLayout layout{};
+
+    {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        if (session->state != IEC_RUNTIME_RUNNING) {
+            return IEC_STATUS_BAD_STATE;
+        }
+
+        layout = get_asdu_layout(*session);
+        if (layout.cot_length == 0 || layout.common_address_length == 0 ||
+            layout.information_object_address_length == 0 ||
+            !fits_uint_le(request->common_address, layout.common_address_length)) {
+            return IEC_STATUS_INVALID_ARGUMENT;
+        }
+
+        request_id = take_next_request_id(*session);
+        frame[frame_size++] = kAsduTypeDeviceDescription;
+        frame[frame_size++] = 1;
+        write_uint_le(frame, frame_size, kCauseRequest, 1);
+        if (layout.cot_length == 2) {
+            write_uint_le(frame, frame_size, kDefaultOriginatorAddress, 1);
+        }
+        write_uint_le(frame, frame_size, request->common_address, layout.common_address_length);
+        write_uint_le(
+            frame,
+            frame_size,
+            kDeviceDescriptionInformationObjectAddress,
+            layout.information_object_address_length);
+        write_uint_le(frame, frame_size, request_id, 4);
+        frame[frame_size++] = static_cast<uint8_t>(request->preferred_format);
+        write_uint_le(frame, frame_size, request->max_content_size, 4);
+
+        if (frame_size > session->transport.max_plain_frame_len) {
+            return IEC_STATUS_INVALID_ARGUMENT;
+        }
+
+        session->pending_device_descriptions.push_back(iec_session_t::PendingDeviceDescription{
+            request_id,
+            request->common_address,
+            request->max_content_size,
+        });
+        transport = session->transport;
+        raw_callback = session->callbacks.on_raw_asdu;
+        user_context = session->config.user_context;
+        timeout_ms = session->config.command_timeout_ms;
+        raw_enabled = session->config.enable_raw_asdu != 0;
+    }
+
+    const int send_result = transport.send(transport.ctx, frame, frame_size, timeout_ms);
+    if (send_result != 0) {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        auto match = std::find_if(
+            session->pending_device_descriptions.begin(),
+            session->pending_device_descriptions.end(),
+            [request_id](const iec_session_t::PendingDeviceDescription &pending) {
+                return pending.request_id == request_id;
+            });
+        if (match != session->pending_device_descriptions.end()) {
+            session->pending_device_descriptions.erase(match);
+        }
+        return IEC_STATUS_IO_ERROR;
+    }
+
+    *out_request_id = request_id;
+
+    if (raw_enabled) {
+        notify_raw_asdu(
+            session,
+            IEC_RAW_ASDU_TX,
+            frame,
+            frame_size,
+            layout,
+            raw_callback,
+            user_context);
+    }
+
+    return IEC_STATUS_OK;
 }
 
 namespace {
