@@ -45,6 +45,14 @@ GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL m101_counter_interrogation(
     return gw::protocol::counter_interrogation(session, request);
 }
 
+GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL m101_control_point(
+    iec_session_t *session,
+    const iec_command_request_t *request,
+    uint32_t *out_command_id)
+{
+    return gw::protocol::control_point(session, request, out_command_id);
+}
+
 GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL m101_read_point(
     iec_session_t *session,
     const iec_point_address_t *address)

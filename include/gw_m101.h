@@ -111,6 +111,48 @@ typedef struct iec_point_value {
     iec_timestamp_t timestamp;
 } iec_point_value_t;
 
+typedef enum iec_command_type {
+    IEC_COMMAND_SINGLE = 1,
+    IEC_COMMAND_DOUBLE = 2,
+    IEC_COMMAND_STEP = 3,
+    IEC_COMMAND_SETPOINT_SCALED = 4,
+    IEC_COMMAND_SETPOINT_FLOAT = 5,
+    IEC_COMMAND_SETPOINT_NORMALIZED = 6
+} iec_command_type_t;
+
+typedef enum iec_command_semantic {
+    IEC_COMMAND_SEMANTIC_GENERAL = 0,
+    IEC_COMMAND_SEMANTIC_FACTORY_RESET = 1,
+    IEC_COMMAND_SEMANTIC_DEVICE_REBOOT = 2
+} iec_command_semantic_t;
+
+typedef enum iec_command_mode {
+    IEC_COMMAND_MODE_DIRECT = 1,
+    IEC_COMMAND_MODE_SELECT = 2,
+    IEC_COMMAND_MODE_EXECUTE = 3,
+    IEC_COMMAND_MODE_CANCEL = 4
+} iec_command_mode_t;
+
+typedef union iec_command_data {
+    uint8_t single;
+    uint8_t doubled;
+    int16_t normalized;
+    int16_t scaled;
+    float short_float;
+    int8_t step;
+} iec_command_data_t;
+
+typedef struct iec_command_request {
+    iec_point_address_t address;
+    iec_command_type_t command_type;
+    iec_command_semantic_t semantic;
+    iec_command_mode_t mode;
+    uint8_t qualifier;
+    uint8_t execute_on_ack;
+    uint16_t timeout_ms;
+    iec_command_data_t value;
+} iec_command_request_t;
+
 typedef struct iec_interrogation_request {
     uint16_t common_address;
     uint8_t qualifier;
@@ -142,6 +184,22 @@ typedef struct iec_raw_asdu_tx {
     uint32_t payload_size;
     uint8_t bypass_high_level_validation;
 } iec_raw_asdu_tx_t;
+
+typedef enum iec_command_result_code {
+    IEC_COMMAND_RESULT_ACCEPTED = 1,
+    IEC_COMMAND_RESULT_REJECTED = 2,
+    IEC_COMMAND_RESULT_TIMEOUT = 3,
+    IEC_COMMAND_RESULT_NEGATIVE_CONFIRM = 4,
+    IEC_COMMAND_RESULT_PROTOCOL_ERROR = 5
+} iec_command_result_code_t;
+
+typedef struct iec_command_result {
+    uint32_t command_id;
+    iec_command_semantic_t semantic;
+    iec_command_result_code_t result;
+    iec_point_address_t address;
+    uint8_t is_final;
+} iec_command_result_t;
 
 typedef int(GW_PROTOCOL_CALL *iec_transport_send_fn)(
     void *ctx,
@@ -185,6 +243,11 @@ typedef void(GW_PROTOCOL_CALL *iec_on_point_indication_fn)(
     const iec_point_value_t *value,
     void *user_context);
 
+typedef void(GW_PROTOCOL_CALL *iec_on_command_result_fn)(
+    iec_session_t *session,
+    const iec_command_result_t *result,
+    void *user_context);
+
 typedef void(GW_PROTOCOL_CALL *iec_on_raw_asdu_fn)(
     iec_session_t *session,
     const iec_raw_asdu_event_t *event,
@@ -193,6 +256,7 @@ typedef void(GW_PROTOCOL_CALL *iec_on_raw_asdu_fn)(
 typedef struct iec_callbacks {
     iec_on_session_state_fn on_session_state;
     iec_on_point_indication_fn on_point_indication;
+    iec_on_command_result_fn on_command_result;
     iec_on_raw_asdu_fn on_raw_asdu;
 } iec_callbacks_t;
 
@@ -255,6 +319,10 @@ GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL m101_general_interrogation(
 GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL m101_counter_interrogation(
     iec_session_t *session,
     const iec_counter_interrogation_request_t *request);
+GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL m101_control_point(
+    iec_session_t *session,
+    const iec_command_request_t *request,
+    uint32_t *out_command_id);
 GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL m101_read_point(
     iec_session_t *session,
     const iec_point_address_t *address);

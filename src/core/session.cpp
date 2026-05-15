@@ -11,6 +11,12 @@
 #include <vector>
 
 struct iec_session {
+    struct PendingCommand {
+        uint32_t command_id = 0;
+        iec_command_semantic_t semantic = IEC_COMMAND_SEMANTIC_GENERAL;
+        iec_point_address_t address{};
+    };
+
     gw::protocol::Profile profile;
     iec_session_config_t config;
     iec_transport_t transport;
@@ -18,8 +24,10 @@ struct iec_session {
     std::variant<m101_master_config_t, iec101_master_config_t, iec104_master_config_t> protocol_config;
     mutable std::mutex mutex;
     std::thread worker;
+    std::vector<PendingCommand> pending_commands;
     bool stop_requested = false;
     iec_runtime_state_t state = IEC_RUNTIME_CREATED;
+    uint32_t next_command_id = 1;
 };
 
 namespace gw::protocol {
@@ -44,6 +52,12 @@ constexpr uint8_t kAsduTypeMeasuredNormalized = 9;
 constexpr uint8_t kAsduTypeMeasuredScaled = 11;
 constexpr uint8_t kAsduTypeMeasuredShortFloat = 13;
 constexpr uint8_t kAsduTypeIntegratedTotal = 15;
+constexpr uint8_t kAsduTypeSingleCommand = 45;
+constexpr uint8_t kAsduTypeDoubleCommand = 46;
+constexpr uint8_t kAsduTypeStepCommand = 47;
+constexpr uint8_t kAsduTypeSetpointNormalized = 48;
+constexpr uint8_t kAsduTypeSetpointScaled = 49;
+constexpr uint8_t kAsduTypeSetpointFloat = 50;
 constexpr uint8_t kAsduTypeGeneralInterrogation = 100;
 constexpr uint8_t kAsduTypeCounterInterrogation = 101;
 constexpr uint8_t kAsduTypeReadCommand = 102;
@@ -55,6 +69,7 @@ constexpr uint8_t kGeneralInterrogationMaxQualifier = 36;
 constexpr uint8_t kCounterInterrogationMinQualifier = 1;
 constexpr uint8_t kCounterInterrogationMaxQualifier = 5;
 constexpr uint8_t kCounterInterrogationMaxFreeze = 3;
+constexpr uint8_t kSelectExecuteQualifierMask = 0x80;
 
 bool is_link_mode_valid(iec101_link_mode_t mode) noexcept
 {
@@ -134,6 +149,63 @@ bool read_option_value(const void *value, uint32_t value_size, uint32_t &out) no
     return false;
 }
 
+bool is_command_type_valid(iec_command_type_t type) noexcept
+{
+    switch (type) {
+    case IEC_COMMAND_SINGLE:
+    case IEC_COMMAND_DOUBLE:
+    case IEC_COMMAND_STEP:
+    case IEC_COMMAND_SETPOINT_SCALED:
+    case IEC_COMMAND_SETPOINT_FLOAT:
+    case IEC_COMMAND_SETPOINT_NORMALIZED:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool is_command_semantic_valid(iec_command_semantic_t semantic) noexcept
+{
+    switch (semantic) {
+    case IEC_COMMAND_SEMANTIC_GENERAL:
+    case IEC_COMMAND_SEMANTIC_FACTORY_RESET:
+    case IEC_COMMAND_SEMANTIC_DEVICE_REBOOT:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool is_command_mode_valid(iec_command_mode_t mode) noexcept
+{
+    switch (mode) {
+    case IEC_COMMAND_MODE_DIRECT:
+    case IEC_COMMAND_MODE_SELECT:
+    case IEC_COMMAND_MODE_EXECUTE:
+    case IEC_COMMAND_MODE_CANCEL:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool is_command_value_valid(const iec_command_request_t &request) noexcept
+{
+    switch (request.command_type) {
+    case IEC_COMMAND_SINGLE:
+        return request.value.single <= 1 && request.qualifier <= 0x1F;
+    case IEC_COMMAND_DOUBLE:
+        return request.value.doubled <= 3 && request.qualifier <= 0x1F;
+    case IEC_COMMAND_STEP:
+    case IEC_COMMAND_SETPOINT_NORMALIZED:
+    case IEC_COMMAND_SETPOINT_SCALED:
+    case IEC_COMMAND_SETPOINT_FLOAT:
+        return request.qualifier <= 0x7F;
+    default:
+        return false;
+    }
+}
+
 AsduLayout get_asdu_layout(const iec_session_t &session) noexcept
 {
     switch (session.profile) {
@@ -186,6 +258,18 @@ void write_uint_le(uint8_t *buffer, uint32_t &offset, uint32_t value, uint8_t le
     for (uint8_t i = 0; i < length; ++i) {
         buffer[offset++] = static_cast<uint8_t>((value >> (i * 8U)) & 0xFFU);
     }
+}
+
+void write_int16_le(uint8_t *buffer, uint32_t &offset, int16_t value) noexcept
+{
+    write_uint_le(buffer, offset, static_cast<uint16_t>(value), 2);
+}
+
+void write_float_le(uint8_t *buffer, uint32_t &offset, float value) noexcept
+{
+    uint32_t raw = 0;
+    std::memcpy(&raw, &value, sizeof(raw));
+    write_uint_le(buffer, offset, raw, 4);
 }
 
 bool fits_uint_le(uint32_t value, uint8_t length) noexcept
@@ -344,6 +428,175 @@ bool decode_point_value(uint8_t type_id, const uint8_t *data, uint32_t available
     }
 }
 
+bool command_type_id(iec_command_type_t type, uint8_t &out_type_id) noexcept
+{
+    switch (type) {
+    case IEC_COMMAND_SINGLE:
+        out_type_id = kAsduTypeSingleCommand;
+        return true;
+    case IEC_COMMAND_DOUBLE:
+        out_type_id = kAsduTypeDoubleCommand;
+        return true;
+    case IEC_COMMAND_STEP:
+        out_type_id = kAsduTypeStepCommand;
+        return true;
+    case IEC_COMMAND_SETPOINT_NORMALIZED:
+        out_type_id = kAsduTypeSetpointNormalized;
+        return true;
+    case IEC_COMMAND_SETPOINT_SCALED:
+        out_type_id = kAsduTypeSetpointScaled;
+        return true;
+    case IEC_COMMAND_SETPOINT_FLOAT:
+        out_type_id = kAsduTypeSetpointFloat;
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool append_command_value(const iec_command_request_t &request, uint8_t *frame, uint32_t &frame_size) noexcept
+{
+    switch (request.command_type) {
+    case IEC_COMMAND_SINGLE:
+        frame[frame_size++] = static_cast<uint8_t>(
+            (request.value.single & 0x01U) |
+            (request.mode == IEC_COMMAND_MODE_SELECT ? kSelectExecuteQualifierMask : 0U) |
+            ((request.qualifier & 0x1FU) << 2U));
+        return true;
+    case IEC_COMMAND_DOUBLE:
+        frame[frame_size++] = static_cast<uint8_t>(
+            (request.value.doubled & 0x03U) |
+            (request.mode == IEC_COMMAND_MODE_SELECT ? kSelectExecuteQualifierMask : 0U) |
+            ((request.qualifier & 0x1FU) << 2U));
+        return true;
+    case IEC_COMMAND_STEP:
+        frame[frame_size++] = static_cast<uint8_t>(request.value.step);
+        frame[frame_size++] = static_cast<uint8_t>(
+            (request.mode == IEC_COMMAND_MODE_SELECT ? kSelectExecuteQualifierMask : 0U) |
+            (request.qualifier & 0x1FU));
+        return true;
+    case IEC_COMMAND_SETPOINT_NORMALIZED:
+        write_int16_le(frame, frame_size, request.value.normalized);
+        frame[frame_size++] = static_cast<uint8_t>(
+            (request.mode == IEC_COMMAND_MODE_SELECT ? kSelectExecuteQualifierMask : 0U) |
+            (request.qualifier & 0x1FU));
+        return true;
+    case IEC_COMMAND_SETPOINT_SCALED:
+        write_int16_le(frame, frame_size, request.value.scaled);
+        frame[frame_size++] = static_cast<uint8_t>(
+            (request.mode == IEC_COMMAND_MODE_SELECT ? kSelectExecuteQualifierMask : 0U) |
+            (request.qualifier & 0x1FU));
+        return true;
+    case IEC_COMMAND_SETPOINT_FLOAT:
+        write_float_le(frame, frame_size, request.value.short_float);
+        frame[frame_size++] = static_cast<uint8_t>(
+            (request.mode == IEC_COMMAND_MODE_SELECT ? kSelectExecuteQualifierMask : 0U) |
+            (request.qualifier & 0x1FU));
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool decode_command_result(
+    const uint8_t *payload,
+    uint32_t payload_size,
+    const AsduLayout &layout,
+    iec_command_result_t &out) noexcept
+{
+    if (payload == nullptr || payload_size < 2U + layout.cot_length + layout.common_address_length +
+            layout.information_object_address_length) {
+        return false;
+    }
+
+    iec_command_type_t command_type{};
+    switch (payload[0]) {
+    case kAsduTypeSingleCommand:
+        command_type = IEC_COMMAND_SINGLE;
+        break;
+    case kAsduTypeDoubleCommand:
+        command_type = IEC_COMMAND_DOUBLE;
+        break;
+    case kAsduTypeStepCommand:
+        command_type = IEC_COMMAND_STEP;
+        break;
+    case kAsduTypeSetpointNormalized:
+        command_type = IEC_COMMAND_SETPOINT_NORMALIZED;
+        break;
+    case kAsduTypeSetpointScaled:
+        command_type = IEC_COMMAND_SETPOINT_SCALED;
+        break;
+    case kAsduTypeSetpointFloat:
+        command_type = IEC_COMMAND_SETPOINT_FLOAT;
+        break;
+    default:
+        return false;
+    }
+
+    const uint8_t variable_structure = payload[1];
+    if ((variable_structure & 0x7FU) == 0) {
+        return false;
+    }
+
+    const uint32_t cause_offset = 2U;
+    const uint8_t cause = payload[cause_offset];
+    const uint8_t originator = layout.cot_length == 2 ? payload[cause_offset + 1] : 0;
+    const uint32_t common_address_offset = cause_offset + layout.cot_length;
+    const uint16_t common_address =
+        read_uint16_le(payload + common_address_offset, layout.common_address_length);
+    const uint32_t info_offset = common_address_offset + layout.common_address_length;
+
+    out = iec_command_result_t{};
+    out.result = (cause & 0x40U) != 0 ? IEC_COMMAND_RESULT_NEGATIVE_CONFIRM : IEC_COMMAND_RESULT_ACCEPTED;
+    out.is_final = 1;
+    out.address.common_address = common_address;
+    out.address.information_object_address =
+        read_uint32_le(payload + info_offset, layout.information_object_address_length);
+    out.address.type_id = payload[0];
+    out.address.cause_of_transmission = static_cast<uint8_t>(cause & 0x3FU);
+    out.address.originator_address = originator;
+
+    (void)command_type;
+    return true;
+}
+
+void dispatch_command_result(
+    iec_session_t *session,
+    const uint8_t *payload,
+    uint32_t payload_size,
+    const AsduLayout &layout,
+    iec_on_command_result_fn callback,
+    void *user_context) noexcept
+{
+    if (callback == nullptr) {
+        return;
+    }
+
+    iec_command_result_t result{};
+    if (!decode_command_result(payload, payload_size, layout, result)) {
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        auto match = std::find_if(
+            session->pending_commands.begin(),
+            session->pending_commands.end(),
+            [&result](const iec_session_t::PendingCommand &pending) {
+                return pending.address.common_address == result.address.common_address &&
+                    pending.address.information_object_address == result.address.information_object_address &&
+                    pending.address.originator_address == result.address.originator_address;
+            });
+        if (match != session->pending_commands.end()) {
+            result.command_id = match->command_id;
+            result.semantic = match->semantic;
+            session->pending_commands.erase(match);
+        }
+    }
+
+    callback(session, &result, user_context);
+}
+
 void dispatch_point_indications(
     iec_session_t *session,
     const uint8_t *payload,
@@ -432,6 +685,7 @@ void receive_worker(iec_session_t *session) noexcept
         iec_transport_t transport{};
         iec_on_raw_asdu_fn raw_callback = nullptr;
         iec_on_point_indication_fn point_callback = nullptr;
+        iec_on_command_result_fn command_callback = nullptr;
         void *user_context = nullptr;
         uint32_t recv_timeout_ms = 50;
         uint32_t max_frame_len = 0;
@@ -446,6 +700,7 @@ void receive_worker(iec_session_t *session) noexcept
             transport = session->transport;
             raw_callback = session->callbacks.on_raw_asdu;
             point_callback = session->callbacks.on_point_indication;
+            command_callback = session->callbacks.on_command_result;
             user_context = session->config.user_context;
             recv_timeout_ms = std::min<uint32_t>(session->config.command_timeout_ms, 50U);
             if (recv_timeout_ms == 0) {
@@ -492,6 +747,13 @@ void receive_worker(iec_session_t *session) noexcept
             received,
             layout,
             point_callback,
+            user_context);
+        dispatch_command_result(
+            session,
+            buffer.data(),
+            received,
+            layout,
+            command_callback,
             user_context);
     }
 }
@@ -650,6 +912,128 @@ iec_status_t get_runtime_state(const iec_session_t *session, iec_runtime_state_t
     }
     std::lock_guard<std::mutex> lock(session->mutex);
     *out_state = session->state;
+    return IEC_STATUS_OK;
+}
+
+iec_status_t control_point(
+    iec_session_t *session,
+    const iec_command_request_t *request,
+    uint32_t *out_command_id) noexcept
+{
+    if (out_command_id != nullptr) {
+        *out_command_id = 0;
+    }
+    if (session == nullptr || request == nullptr || out_command_id == nullptr) {
+        return IEC_STATUS_INVALID_ARGUMENT;
+    }
+    if (!is_command_type_valid(request->command_type) ||
+        !is_command_semantic_valid(request->semantic) ||
+        !is_command_mode_valid(request->mode) ||
+        !is_binary_flag(request->execute_on_ack) ||
+        !is_command_value_valid(*request)) {
+        return IEC_STATUS_INVALID_ARGUMENT;
+    }
+    if ((request->semantic == IEC_COMMAND_SEMANTIC_FACTORY_RESET ||
+            request->semantic == IEC_COMMAND_SEMANTIC_DEVICE_REBOOT) &&
+        request->command_type != IEC_COMMAND_SINGLE && request->command_type != IEC_COMMAND_DOUBLE) {
+        return IEC_STATUS_INVALID_ARGUMENT;
+    }
+
+    uint8_t frame[32]{};
+    uint32_t frame_size = 0;
+    uint32_t command_id = 0;
+    uint8_t type_id = 0;
+    iec_transport_t transport{};
+    iec_on_raw_asdu_fn raw_callback = nullptr;
+    void *user_context = nullptr;
+    uint32_t timeout_ms = 0;
+    bool raw_enabled = false;
+    AsduLayout layout{};
+
+    if (!command_type_id(request->command_type, type_id)) {
+        return IEC_STATUS_INVALID_ARGUMENT;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        if (session->state != IEC_RUNTIME_RUNNING) {
+            return IEC_STATUS_BAD_STATE;
+        }
+
+        layout = get_asdu_layout(*session);
+        if (layout.cot_length == 0 || layout.common_address_length == 0 ||
+            layout.information_object_address_length == 0 ||
+            !fits_uint_le(request->address.common_address, layout.common_address_length) ||
+            !fits_uint_le(request->address.information_object_address, layout.information_object_address_length)) {
+            return IEC_STATUS_INVALID_ARGUMENT;
+        }
+
+        frame[frame_size++] = type_id;
+        frame[frame_size++] = 1;
+        write_uint_le(frame, frame_size, kCauseActivation, 1);
+        if (layout.cot_length == 2) {
+            write_uint_le(frame, frame_size, request->address.originator_address, 1);
+        }
+        write_uint_le(frame, frame_size, request->address.common_address, layout.common_address_length);
+        write_uint_le(
+            frame,
+            frame_size,
+            request->address.information_object_address,
+            layout.information_object_address_length);
+        if (!append_command_value(*request, frame, frame_size)) {
+            return IEC_STATUS_INVALID_ARGUMENT;
+        }
+
+        if (frame_size > session->transport.max_plain_frame_len) {
+            return IEC_STATUS_INVALID_ARGUMENT;
+        }
+
+        command_id = session->next_command_id++;
+        if (session->next_command_id == 0) {
+            session->next_command_id = 1;
+        }
+        session->pending_commands.push_back(iec_session_t::PendingCommand{
+            command_id,
+            request->semantic,
+            request->address,
+        });
+        transport = session->transport;
+        raw_callback = session->callbacks.on_raw_asdu;
+        user_context = session->config.user_context;
+        timeout_ms = request->timeout_ms != 0 ? request->timeout_ms : session->config.command_timeout_ms;
+        raw_enabled = session->config.enable_raw_asdu != 0;
+    }
+
+    const int send_result = transport.send(transport.ctx, frame, frame_size, timeout_ms);
+    if (send_result != 0) {
+        {
+            std::lock_guard<std::mutex> lock(session->mutex);
+            auto match = std::find_if(
+                session->pending_commands.begin(),
+                session->pending_commands.end(),
+                [command_id](const iec_session_t::PendingCommand &pending) {
+                    return pending.command_id == command_id;
+                });
+            if (match != session->pending_commands.end()) {
+                session->pending_commands.erase(match);
+            }
+        }
+        return IEC_STATUS_IO_ERROR;
+    }
+
+    *out_command_id = command_id;
+
+    if (raw_enabled) {
+        notify_raw_asdu(
+            session,
+            IEC_RAW_ASDU_TX,
+            frame,
+            frame_size,
+            layout,
+            raw_callback,
+            user_context);
+    }
+
     return IEC_STATUS_OK;
 }
 

@@ -220,6 +220,12 @@ struct StateRecorder {
 
     std::vector<PointEvent> point_events;
 
+    struct CommandEvent {
+        iec_command_result_t result{};
+    };
+
+    std::vector<CommandEvent> command_events;
+
     void record(iec_runtime_state_t state)
     {
         {
@@ -258,6 +264,15 @@ struct StateRecorder {
         cv.notify_all();
     }
 
+    void record_command(const iec_command_result_t &result)
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            command_events.push_back(CommandEvent{result});
+        }
+        cv.notify_all();
+    }
+
     std::vector<iec_runtime_state_t> snapshot() const
     {
         std::lock_guard<std::mutex> lock(mutex);
@@ -276,6 +291,12 @@ struct StateRecorder {
         return point_events;
     }
 
+    std::vector<CommandEvent> command_snapshot() const
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        return command_events;
+    }
+
     bool wait_until_contains(iec_runtime_state_t state)
     {
         std::unique_lock<std::mutex> lock(mutex);
@@ -289,6 +310,14 @@ struct StateRecorder {
         std::unique_lock<std::mutex> lock(mutex);
         return cv.wait_for(lock, kStateWaitTimeout, [&] {
             return point_events.size() >= count;
+        });
+    }
+
+    bool wait_until_command_count(std::size_t count)
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        return cv.wait_for(lock, kStateWaitTimeout, [&] {
+            return command_events.size() >= count;
         });
     }
 };
@@ -327,6 +356,16 @@ void on_point_indication(
     recorder->record_point(*address, *value);
 }
 
+void on_command_result(iec_session_t *session, const iec_command_result_t *result, void *user_context)
+{
+    (void)session;
+    auto *recorder = static_cast<StateRecorder *>(user_context);
+    if (recorder == nullptr || result == nullptr) {
+        return;
+    }
+    recorder->record_command(*result);
+}
+
 iec_session_config_t make_common_config(StateRecorder &recorder)
 {
     iec_session_config_t config{};
@@ -356,6 +395,7 @@ iec_callbacks_t make_callbacks()
     iec_callbacks_t callbacks{};
     callbacks.on_session_state = on_session_state;
     callbacks.on_point_indication = on_point_indication;
+    callbacks.on_command_result = on_command_result;
     callbacks.on_raw_asdu = on_raw_asdu;
     return callbacks;
 }
@@ -850,6 +890,150 @@ template <
     typename DestroyFn,
     typename StartFn,
     typename StopFn,
+    typename ControlPointFn>
+void exercise_control_point(
+    const char *name,
+    const Config &protocol_config,
+    CreateFn create,
+    DestroyFn destroy,
+    StartFn start,
+    StopFn stop,
+    ControlPointFn control_point)
+{
+    StateRecorder recorder;
+    MockTransport mock;
+    auto common = make_common_config(recorder);
+    auto transport = make_transport(mock);
+    auto callbacks = make_callbacks();
+
+    iec_session_t *session = nullptr;
+    iec_command_request_t request{};
+    request.address.common_address = 1;
+    request.address.information_object_address = 0x4001;
+    request.address.originator_address = 7;
+    request.command_type = IEC_COMMAND_DOUBLE;
+    request.semantic = IEC_COMMAND_SEMANTIC_FACTORY_RESET;
+    request.mode = IEC_COMMAND_MODE_SELECT;
+    request.qualifier = 3;
+    request.execute_on_ack = 1;
+    request.timeout_ms = 3000;
+    request.value.doubled = 2;
+
+    auto invalid_type = request;
+    invalid_type.command_type = static_cast<iec_command_type_t>(0);
+    auto invalid_semantic = request;
+    invalid_semantic.semantic = static_cast<iec_command_semantic_t>(99);
+    auto invalid_mode = request;
+    invalid_mode.mode = static_cast<iec_command_mode_t>(0);
+    auto invalid_flag = request;
+    invalid_flag.execute_on_ack = 2;
+    auto invalid_address = request;
+    invalid_address.address.information_object_address = 0x01000000;
+    auto invalid_factory_reset_type = request;
+    invalid_factory_reset_type.command_type = IEC_COMMAND_SETPOINT_SCALED;
+    invalid_factory_reset_type.value.scaled = 10;
+    auto invalid_double_value = request;
+    invalid_double_value.value.doubled = 4;
+
+    const std::vector<uint8_t> expected_request{
+        46,
+        1,
+        6,
+        7,
+        1,
+        0,
+        0x01,
+        0x40,
+        0x00,
+        0x8e,
+    };
+    const std::vector<uint8_t> command_response{
+        46,
+        1,
+        7,
+        7,
+        1,
+        0,
+        0x01,
+        0x40,
+        0x00,
+        0x02,
+    };
+
+    uint32_t command_id = 99;
+    EXPECT_STATUS(control_point(nullptr, &request, &command_id), IEC_STATUS_INVALID_ARGUMENT);
+    EXPECT_TRUE(command_id == 0);
+    EXPECT_STATUS(create(&common, &protocol_config, &transport, &callbacks, &session), IEC_STATUS_OK);
+    EXPECT_TRUE(session != nullptr);
+
+    auto cleanup = [&] {
+        if (session != nullptr) {
+            (void)stop(session, 100);
+            (void)destroy(session);
+            session = nullptr;
+        }
+        close_transport(mock);
+    };
+
+    try {
+        command_id = 99;
+        EXPECT_STATUS(control_point(session, nullptr, &command_id), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_TRUE(command_id == 0);
+        EXPECT_STATUS(control_point(session, &request, nullptr), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(control_point(session, &invalid_type, &command_id), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(control_point(session, &invalid_semantic, &command_id), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(control_point(session, &invalid_mode, &command_id), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(control_point(session, &invalid_flag, &command_id), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(control_point(session, &invalid_factory_reset_type, &command_id), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(control_point(session, &invalid_double_value, &command_id), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(control_point(session, &request, &command_id), IEC_STATUS_BAD_STATE);
+        EXPECT_TRUE(command_id == 0);
+
+        EXPECT_STATUS(start(session), IEC_STATUS_OK);
+        EXPECT_TRUE(recorder.wait_until_contains(IEC_RUNTIME_RUNNING));
+        EXPECT_STATUS(control_point(session, &invalid_address, &command_id), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(control_point(session, &request, &command_id), IEC_STATUS_OK);
+        EXPECT_TRUE(command_id == 1);
+        EXPECT_TRUE(mock.send_count == 1);
+        EXPECT_TRUE(mock.last_sent == expected_request);
+
+        uint32_t second_command_id = 0;
+        EXPECT_STATUS(control_point(session, &request, &second_command_id), IEC_STATUS_OK);
+        EXPECT_TRUE(second_command_id == 2);
+        EXPECT_TRUE(mock.send_count == 2);
+
+        push_recv(mock, command_response);
+        EXPECT_TRUE(recorder.wait_until_command_count(1));
+        const auto commands = recorder.command_snapshot();
+        EXPECT_TRUE(commands.size() == 1);
+        EXPECT_TRUE(commands[0].result.command_id == 1);
+        EXPECT_TRUE(commands[0].result.semantic == IEC_COMMAND_SEMANTIC_FACTORY_RESET);
+        EXPECT_TRUE(commands[0].result.result == IEC_COMMAND_RESULT_ACCEPTED);
+        EXPECT_TRUE(commands[0].result.is_final == 1);
+        EXPECT_TRUE(commands[0].result.address.common_address == 1);
+        EXPECT_TRUE(commands[0].result.address.information_object_address == 0x4001);
+        EXPECT_TRUE(commands[0].result.address.type_id == 46);
+        EXPECT_TRUE(commands[0].result.address.cause_of_transmission == 7);
+        EXPECT_TRUE(commands[0].result.address.originator_address == 7);
+
+        EXPECT_STATUS(stop(session, 1000), IEC_STATUS_OK);
+        EXPECT_STATUS(destroy(session), IEC_STATUS_OK);
+        session = nullptr;
+        close_transport(mock);
+    } catch (...) {
+        cleanup();
+        throw;
+    }
+
+    std::printf("  %s control_point\n", name);
+}
+
+template <
+    typename Config,
+    typename CreateFn,
+    typename DestroyFn,
+    typename StartFn,
+    typename StopFn,
     typename ReadPointFn>
 void exercise_read_point(
     const char *name,
@@ -1046,6 +1230,27 @@ void test_iec101_counter_interrogation()
         });
 }
 
+void test_iec101_control_point()
+{
+    const auto valid = make_iec101_config();
+    exercise_control_point(
+        "iec101",
+        valid,
+        [](const iec_session_config_t *common,
+           const iec101_master_config_t *config,
+           const iec_transport_t *transport,
+           const iec_callbacks_t *callbacks,
+           iec_session_t **out_session) {
+            return iec101_create(common, config, transport, callbacks, out_session);
+        },
+        [](iec_session_t *session) { return iec101_destroy(session); },
+        [](iec_session_t *session) { return iec101_start(session); },
+        [](iec_session_t *session, uint32_t timeout_ms) { return iec101_stop(session, timeout_ms); },
+        [](iec_session_t *session, const iec_command_request_t *request, uint32_t *out_command_id) {
+            return iec101_control_point(session, request, out_command_id);
+        });
+}
+
 void test_iec101_read_point()
 {
     const auto valid = make_iec101_config();
@@ -1167,6 +1372,27 @@ void test_m101_counter_interrogation()
         [](iec_session_t *session, uint32_t timeout_ms) { return m101_stop(session, timeout_ms); },
         [](iec_session_t *session, const iec_counter_interrogation_request_t *request) {
             return m101_counter_interrogation(session, request);
+        });
+}
+
+void test_m101_control_point()
+{
+    const auto valid = make_m101_config();
+    exercise_control_point(
+        "m101",
+        valid,
+        [](const iec_session_config_t *common,
+           const m101_master_config_t *config,
+           const iec_transport_t *transport,
+           const iec_callbacks_t *callbacks,
+           iec_session_t **out_session) {
+            return m101_create(common, config, transport, callbacks, out_session);
+        },
+        [](iec_session_t *session) { return m101_destroy(session); },
+        [](iec_session_t *session) { return m101_start(session); },
+        [](iec_session_t *session, uint32_t timeout_ms) { return m101_stop(session, timeout_ms); },
+        [](iec_session_t *session, const iec_command_request_t *request, uint32_t *out_command_id) {
+            return m101_control_point(session, request, out_command_id);
         });
 }
 
@@ -1294,6 +1520,27 @@ void test_iec104_counter_interrogation()
         });
 }
 
+void test_iec104_control_point()
+{
+    const auto valid = make_iec104_config();
+    exercise_control_point(
+        "iec104",
+        valid,
+        [](const iec_session_config_t *common,
+           const iec104_master_config_t *config,
+           const iec_transport_t *transport,
+           const iec_callbacks_t *callbacks,
+           iec_session_t **out_session) {
+            return iec104_create(common, config, transport, callbacks, out_session);
+        },
+        [](iec_session_t *session) { return iec104_destroy(session); },
+        [](iec_session_t *session) { return iec104_start(session); },
+        [](iec_session_t *session, uint32_t timeout_ms) { return iec104_stop(session, timeout_ms); },
+        [](iec_session_t *session, const iec_command_request_t *request, uint32_t *out_command_id) {
+            return iec104_control_point(session, request, out_command_id);
+        });
+}
+
 void test_iec104_read_point()
 {
     const auto valid = make_iec104_config();
@@ -1339,18 +1586,21 @@ int gw_protocol_run_lifecycle_tests(const char *filter)
         {"m101.raw_asdu", test_m101_raw_asdu},
         {"m101.general_interrogation", test_m101_general_interrogation},
         {"m101.counter_interrogation", test_m101_counter_interrogation},
+        {"m101.control_point", test_m101_control_point},
         {"m101.read_point", test_m101_read_point},
         {"iec101.validate_config", test_iec101_validate_config},
         {"iec101.lifecycle", test_iec101_lifecycle},
         {"iec101.raw_asdu", test_iec101_raw_asdu},
         {"iec101.general_interrogation", test_iec101_general_interrogation},
         {"iec101.counter_interrogation", test_iec101_counter_interrogation},
+        {"iec101.control_point", test_iec101_control_point},
         {"iec101.read_point", test_iec101_read_point},
         {"iec104.validate_config", test_iec104_validate_config},
         {"iec104.lifecycle", test_iec104_lifecycle},
         {"iec104.raw_asdu", test_iec104_raw_asdu},
         {"iec104.general_interrogation", test_iec104_general_interrogation},
         {"iec104.counter_interrogation", test_iec104_counter_interrogation},
+        {"iec104.control_point", test_iec104_control_point},
         {"iec104.read_point", test_iec104_read_point},
     };
 

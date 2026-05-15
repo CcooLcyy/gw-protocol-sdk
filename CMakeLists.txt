@@ -62,18 +62,21 @@ if(BUILD_TESTING)
         m101.raw_asdu
         m101.general_interrogation
         m101.counter_interrogation
+        m101.control_point
         m101.read_point
         iec101.validate_config
         iec101.lifecycle
         iec101.raw_asdu
         iec101.general_interrogation
         iec101.counter_interrogation
+        iec101.control_point
         iec101.read_point
         iec104.validate_config
         iec104.lifecycle
         iec104.raw_asdu
         iec104.general_interrogation
         iec104.counter_interrogation
+        iec104.control_point
         iec104.read_point
     )
     foreach(test_case IN LISTS gw_protocol_test_cases)

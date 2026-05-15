@@ -27,6 +27,10 @@ iec_status_t create_session(
 
 iec_status_t destroy_session(iec_session_t *session) noexcept;
 iec_status_t get_runtime_state(const iec_session_t *session, iec_runtime_state_t *out_state) noexcept;
+iec_status_t control_point(
+    iec_session_t *session,
+    const iec_command_request_t *request,
+    uint32_t *out_command_id) noexcept;
 iec_status_t general_interrogation(iec_session_t *session, const iec_interrogation_request_t *request) noexcept;
 iec_status_t counter_interrogation(
     iec_session_t *session,
