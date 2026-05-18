@@ -68,6 +68,7 @@ if(BUILD_TESTING)
         m101.parameters
         m101.device_description
         m101.file_transfer
+        m101.upgrade
         iec101.validate_config
         iec101.lifecycle
         iec101.raw_asdu
@@ -79,6 +80,7 @@ if(BUILD_TESTING)
         iec101.parameters
         iec101.device_description
         iec101.file_transfer
+        iec101.upgrade
         iec104.validate_config
         iec104.lifecycle
         iec104.raw_asdu
@@ -90,6 +92,7 @@ if(BUILD_TESTING)
         iec104.parameters
         iec104.device_description
         iec104.file_transfer
+        iec104.upgrade
     )
     foreach(test_case IN LISTS gw_protocol_test_cases)
         add_test(NAME ${test_case} COMMAND gw_protocol_tests ${test_case})

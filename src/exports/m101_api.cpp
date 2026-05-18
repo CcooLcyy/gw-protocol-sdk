@@ -155,6 +155,21 @@ GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL m101_cancel_file_transfer(
     return gw::protocol::cancel_file_transfer(session, transfer_id);
 }
 
+GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL m101_upgrade_firmware(
+    iec_session_t *session,
+    const iec_upgrade_request_t *request,
+    uint32_t *out_upgrade_id)
+{
+    return gw::protocol::upgrade_firmware(session, request, out_upgrade_id);
+}
+
+GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL m101_cancel_upgrade(
+    iec_session_t *session,
+    uint32_t upgrade_id)
+{
+    return gw::protocol::cancel_upgrade(session, upgrade_id);
+}
+
 GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL m101_set_option(
     iec_session_t *session,
     iec_option_t option,

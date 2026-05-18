@@ -59,6 +59,24 @@ struct iec_session {
         int32_t last_native_error_code = 0;
     };
 
+    struct UpgradeOperation {
+        uint32_t upgrade_id = 0;
+        uint32_t transfer_id = 0;
+        iec_upgrade_stage_t stage = IEC_UPGRADE_STAGE_STARTING;
+        uint16_t common_address = 0;
+        std::string remote_directory;
+        std::string remote_file_name;
+        std::string checksum_text;
+        iec_upgrade_image_source_t image{};
+        uint32_t chunk_size = 0;
+        uint32_t total_size = 0;
+        uint32_t bytes_transferred = 0;
+        uint32_t command_timeout_ms = 0;
+        uint32_t transfer_timeout_ms = 0;
+        uint8_t overwrite_existing = 0;
+        uint8_t cancel_requested = 0;
+    };
+
     gw::protocol::Profile profile;
     iec_session_config_t config;
     iec_transport_t transport;
@@ -72,11 +90,13 @@ struct iec_session {
     std::vector<PendingFileList> pending_file_lists;
     std::vector<PendingDeviceDescription> pending_device_descriptions;
     std::vector<FileTransfer> file_transfers;
+    std::vector<UpgradeOperation> upgrades;
     bool stop_requested = false;
     iec_runtime_state_t state = IEC_RUNTIME_CREATED;
     uint32_t next_command_id = 1;
     uint32_t next_request_id = 1;
     uint32_t next_transfer_id = 1;
+    uint32_t next_upgrade_id = 1;
 };
 
 namespace gw::protocol {
@@ -92,6 +112,36 @@ struct PointDecodeResult {
     iec_point_value_t value{};
     uint32_t consumed = 0;
 };
+
+bool build_upgrade_write_frame(
+    iec_session_t *session,
+    const iec_session_t::UpgradeOperation &upgrade,
+    uint32_t offset,
+    uint8_t *frame,
+    uint32_t &frame_size,
+    uint32_t frame_capacity) noexcept;
+
+bool begin_upgrade_control_frame(
+    iec_session_t *session,
+    uint8_t action,
+    uint16_t common_address,
+    uint8_t *frame,
+    uint32_t &frame_size,
+    AsduLayout &layout) noexcept;
+
+iec_status_t send_file_frame(
+    iec_session_t *session,
+    const uint8_t *frame,
+    uint32_t frame_size,
+    uint32_t id,
+    bool is_transfer,
+    uint32_t *out_id) noexcept;
+
+iec_status_t send_upgrade_control_frame(
+    iec_session_t *session,
+    const uint8_t *frame,
+    uint32_t frame_size,
+    uint32_t timeout_ms) noexcept;
 
 constexpr uint8_t kAsduTypeSinglePoint = 1;
 constexpr uint8_t kAsduTypeDoublePoint = 3;
@@ -120,6 +170,7 @@ constexpr uint8_t kAsduTypeFileRead = 207;
 constexpr uint8_t kAsduTypeFileWrite = 208;
 constexpr uint8_t kAsduTypeFileCancel = 209;
 constexpr uint8_t kAsduTypeDeviceDescription = 210;
+constexpr uint8_t kAsduTypeUpgradeControl = 211;
 constexpr uint8_t kCauseRequest = 5;
 constexpr uint8_t kCauseActivation = 6;
 constexpr uint8_t kCauseActivationConfirm = 7;
@@ -135,11 +186,17 @@ constexpr uint32_t kClockSyncInformationObjectAddress = 0;
 constexpr uint32_t kParameterChannelInformationObjectAddress = 0;
 constexpr uint32_t kFileChannelInformationObjectAddress = 0;
 constexpr uint32_t kDeviceDescriptionInformationObjectAddress = 0;
+constexpr uint32_t kUpgradeChannelInformationObjectAddress = 0;
 constexpr uint32_t kMaxParameterItemsPerRequest = 32;
 constexpr uint32_t kMaxParameterStringBytes = 64;
 constexpr uint32_t kMaxFileNameBytes = 128;
 constexpr uint32_t kMaxFileChunkBytes = 1024;
 constexpr uint32_t kMaxDeviceDescriptionContentBytes = 1024U * 1024U;
+constexpr uint32_t kMaxUpgradeChecksumBytes = 128;
+constexpr uint8_t kUpgradeActionStart = 1;
+constexpr uint8_t kUpgradeActionExecute = 2;
+constexpr uint8_t kUpgradeActionFinish = 3;
+constexpr uint8_t kUpgradeActionCancel = 4;
 
 bool is_link_mode_valid(iec101_link_mode_t mode) noexcept
 {
@@ -401,6 +458,20 @@ bool is_non_empty_bounded_string(const char *value, uint32_t max_length) noexcep
     return value != nullptr && value[0] != '\0' && std::strlen(value) <= max_length;
 }
 
+bool validate_upgrade_request(const iec_upgrade_request_t &request) noexcept
+{
+    if (!is_non_empty_bounded_string(request.remote_directory, kMaxFileNameBytes) ||
+        !is_non_empty_bounded_string(request.remote_file_name, kMaxFileNameBytes) ||
+        !is_binary_flag(request.overwrite_existing) ||
+        request.image.total_size == 0 || request.image.read == nullptr) {
+        return false;
+    }
+    if (request.checksum_text != nullptr && std::strlen(request.checksum_text) > kMaxUpgradeChecksumBytes) {
+        return false;
+    }
+    return true;
+}
+
 bool append_string_field(
     uint8_t *frame,
     uint32_t &frame_size,
@@ -418,6 +489,25 @@ bool append_string_field(
     frame[frame_size++] = static_cast<uint8_t>(length);
     std::memcpy(frame + frame_size, value, length);
     frame_size += length;
+    return true;
+}
+
+bool append_optional_string_field(
+    uint8_t *frame,
+    uint32_t &frame_size,
+    uint32_t capacity,
+    const char *value,
+    uint32_t max_length) noexcept
+{
+    const uint32_t length = value == nullptr ? 0U : static_cast<uint32_t>(std::strlen(value));
+    if (length > max_length || length > 255 || capacity < frame_size + 1 + length) {
+        return false;
+    }
+    frame[frame_size++] = static_cast<uint8_t>(length);
+    if (length > 0) {
+        std::memcpy(frame + frame_size, value, length);
+        frame_size += length;
+    }
     return true;
 }
 
@@ -614,6 +704,15 @@ uint32_t take_next_transfer_id(iec_session_t &session) noexcept
     return transfer_id;
 }
 
+uint32_t take_next_upgrade_id(iec_session_t &session) noexcept
+{
+    const uint32_t upgrade_id = session.next_upgrade_id++;
+    if (session.next_upgrade_id == 0) {
+        session.next_upgrade_id = 1;
+    }
+    return upgrade_id;
+}
+
 void notify_state(iec_session_t *session, iec_runtime_state_t state) noexcept
 {
     iec_on_session_state_fn callback = nullptr;
@@ -668,6 +767,183 @@ void notify_raw_asdu(
     }
 
     callback(session, &event, user_context);
+}
+
+uint8_t percent_complete(uint32_t bytes_transferred, uint32_t total_size) noexcept
+{
+    if (total_size == 0) {
+        return 0;
+    }
+    if (bytes_transferred >= total_size) {
+        return 100;
+    }
+    return static_cast<uint8_t>((static_cast<uint64_t>(bytes_transferred) * 100U) / total_size);
+}
+
+void notify_upgrade_progress(
+    iec_session_t *session,
+    const iec_session_t::UpgradeOperation &upgrade,
+    iec_upgrade_stage_t stage,
+    iec_on_upgrade_progress_fn callback,
+    void *user_context) noexcept
+{
+    if (callback == nullptr) {
+        return;
+    }
+
+    iec_upgrade_progress_t progress{};
+    progress.upgrade_id = upgrade.upgrade_id;
+    progress.stage = stage;
+    progress.transfer_id = upgrade.transfer_id;
+    progress.bytes_transferred = upgrade.bytes_transferred;
+    progress.total_size = upgrade.total_size;
+    progress.percent = percent_complete(upgrade.bytes_transferred, upgrade.total_size);
+    callback(session, &progress, user_context);
+}
+
+void notify_upgrade_result(
+    iec_session_t *session,
+    const iec_session_t::UpgradeOperation &upgrade,
+    iec_upgrade_result_code_t result_code,
+    iec_upgrade_stage_t final_stage,
+    uint8_t cause_of_transmission,
+    int32_t native_error_code,
+    const char *detail_message,
+    iec_on_upgrade_result_fn callback,
+    void *user_context) noexcept
+{
+    if (callback == nullptr) {
+        return;
+    }
+
+    iec_upgrade_result_t result{};
+    result.upgrade_id = upgrade.upgrade_id;
+    result.result = result_code;
+    result.final_stage = final_stage;
+    result.bytes_transferred = upgrade.bytes_transferred;
+    result.total_size = upgrade.total_size;
+    result.cause_of_transmission = cause_of_transmission;
+    result.native_error_code = native_error_code;
+    result.detail_message = detail_message;
+    callback(session, &result, user_context);
+}
+
+void erase_upgrade_state(iec_session_t *session, uint32_t upgrade_id, uint32_t transfer_id) noexcept
+{
+    std::lock_guard<std::mutex> lock(session->mutex);
+    session->upgrades.erase(
+        std::remove_if(
+            session->upgrades.begin(),
+            session->upgrades.end(),
+            [upgrade_id](const iec_session_t::UpgradeOperation &item) {
+                return item.upgrade_id == upgrade_id;
+            }),
+        session->upgrades.end());
+    if (transfer_id != 0) {
+        session->file_transfers.erase(
+            std::remove_if(
+                session->file_transfers.begin(),
+                session->file_transfers.end(),
+                [transfer_id](const iec_session_t::FileTransfer &item) {
+                    return item.transfer_id == transfer_id;
+                }),
+            session->file_transfers.end());
+    }
+}
+
+void set_upgrade_stage(
+    iec_session_t *session,
+    uint32_t upgrade_id,
+    iec_upgrade_stage_t stage) noexcept
+{
+    std::lock_guard<std::mutex> lock(session->mutex);
+    auto match = std::find_if(
+        session->upgrades.begin(),
+        session->upgrades.end(),
+        [upgrade_id](const iec_session_t::UpgradeOperation &item) {
+            return item.upgrade_id == upgrade_id;
+        });
+    if (match != session->upgrades.end()) {
+        match->stage = stage;
+    }
+}
+
+void finish_upgrade_operation(
+    iec_session_t *session,
+    iec_session_t::UpgradeOperation upgrade,
+    iec_upgrade_result_code_t result_code,
+    iec_upgrade_stage_t final_stage,
+    uint8_t cause_of_transmission,
+    int32_t native_error_code,
+    const char *detail_message) noexcept
+{
+    iec_on_upgrade_progress_fn progress_callback = nullptr;
+    iec_on_upgrade_result_fn result_callback = nullptr;
+    void *user_context = nullptr;
+
+    {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        auto transfer = std::find_if(
+            session->file_transfers.begin(),
+            session->file_transfers.end(),
+            [&upgrade](const iec_session_t::FileTransfer &item) {
+                return item.transfer_id == upgrade.transfer_id;
+            });
+        if (transfer != session->file_transfers.end()) {
+            upgrade.bytes_transferred = transfer->acknowledged_offset;
+            if (final_stage == IEC_UPGRADE_STAGE_COMPLETED) {
+                transfer->state = IEC_FILE_TRANSFER_STATE_COMPLETED;
+                transfer->last_result = IEC_FILE_RESULT_COMPLETED;
+                transfer->is_resumable = 0;
+            } else if (final_stage == IEC_UPGRADE_STAGE_CANCELED) {
+                transfer->state = IEC_FILE_TRANSFER_STATE_CANCELED;
+                transfer->last_result = IEC_FILE_RESULT_CANCELED;
+                transfer->is_resumable = 0;
+            } else if (final_stage == IEC_UPGRADE_STAGE_FAILED) {
+                transfer->state = IEC_FILE_TRANSFER_STATE_FAILED;
+                transfer->is_resumable = 0;
+            }
+        }
+
+        progress_callback = session->callbacks.on_upgrade_progress;
+        result_callback = session->callbacks.on_upgrade_result;
+        user_context = session->config.user_context;
+
+        session->upgrades.erase(
+            std::remove_if(
+                session->upgrades.begin(),
+                session->upgrades.end(),
+                [&upgrade](const iec_session_t::UpgradeOperation &item) {
+                    return item.upgrade_id == upgrade.upgrade_id;
+                }),
+            session->upgrades.end());
+        session->file_transfers.erase(
+            std::remove_if(
+                session->file_transfers.begin(),
+                session->file_transfers.end(),
+                [&upgrade](const iec_session_t::FileTransfer &item) {
+                    return item.transfer_id == upgrade.transfer_id;
+                }),
+            session->file_transfers.end());
+    }
+
+    upgrade.stage = final_stage;
+    notify_upgrade_progress(
+        session,
+        upgrade,
+        final_stage,
+        progress_callback,
+        user_context);
+    notify_upgrade_result(
+        session,
+        upgrade,
+        result_code,
+        final_stage,
+        cause_of_transmission,
+        native_error_code,
+        detail_message,
+        result_callback,
+        user_context);
 }
 
 bool decode_point_value(uint8_t type_id, const uint8_t *data, uint32_t available, PointDecodeResult &out) noexcept
@@ -1024,6 +1300,29 @@ iec_file_result_code_t file_result_from_cause(uint8_t raw_cause, uint8_t result_
         return IEC_FILE_RESULT_COMPLETED;
     }
     return IEC_FILE_RESULT_ACCEPTED;
+}
+
+iec_upgrade_result_code_t upgrade_result_from_file_result(iec_file_result_code_t result) noexcept
+{
+    switch (result) {
+    case IEC_FILE_RESULT_COMPLETED:
+    case IEC_FILE_RESULT_ACCEPTED:
+        return IEC_UPGRADE_RESULT_COMPLETED;
+    case IEC_FILE_RESULT_CANCELED:
+        return IEC_UPGRADE_RESULT_CANCELED;
+    case IEC_FILE_RESULT_REJECTED:
+    case IEC_FILE_RESULT_NOT_FOUND:
+        return IEC_UPGRADE_RESULT_REJECTED;
+    case IEC_FILE_RESULT_NEGATIVE_CONFIRM:
+        return IEC_UPGRADE_RESULT_NEGATIVE_CONFIRM;
+    case IEC_FILE_RESULT_TIMEOUT:
+        return IEC_UPGRADE_RESULT_TIMEOUT;
+    case IEC_FILE_RESULT_OFFSET_MISMATCH:
+    case IEC_FILE_RESULT_PROTOCOL_ERROR:
+        return IEC_UPGRADE_RESULT_PROTOCOL_ERROR;
+    default:
+        return IEC_UPGRADE_RESULT_TRANSFER_FAILED;
+    }
 }
 
 bool decode_command_result(
@@ -1590,6 +1889,11 @@ void dispatch_file_messages(
                 }
                 transfer_snapshot = *match;
             }
+            for (auto &upgrade : session->upgrades) {
+                if (upgrade.transfer_id == transfer_id) {
+                    upgrade.bytes_transferred = next_offset;
+                }
+            }
         }
 
         if (data_callback != nullptr) {
@@ -1628,10 +1932,192 @@ void dispatch_file_messages(
                 }
                 transfer_snapshot = *match;
             }
+            for (auto &upgrade : session->upgrades) {
+                if (upgrade.transfer_id == transfer_id) {
+                    upgrade.bytes_transferred = acknowledged_offset;
+                }
+            }
         }
     }
 
-    if ((is_final || operation == IEC_FILE_OPERATION_CANCEL || operation == IEC_FILE_OPERATION_WRITE) &&
+    iec_on_upgrade_progress_fn upgrade_progress_callback = nullptr;
+    iec_on_upgrade_result_fn upgrade_result_callback = nullptr;
+    void *upgrade_user_context = nullptr;
+    bool is_upgrade_transfer = false;
+    std::vector<iec_session_t::UpgradeOperation> upgrade_progress_events;
+    std::vector<iec_session_t::UpgradeOperation> next_chunk_upgrades;
+    std::vector<iec_session_t::UpgradeOperation> completed_upgrades;
+    std::vector<iec_session_t::UpgradeOperation> failed_upgrades;
+    {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        upgrade_progress_callback = session->callbacks.on_upgrade_progress;
+        upgrade_result_callback = session->callbacks.on_upgrade_result;
+        upgrade_user_context = session->config.user_context;
+        for (auto &upgrade : session->upgrades) {
+            if (upgrade.transfer_id != transfer_id) {
+                continue;
+            }
+            is_upgrade_transfer = true;
+            upgrade.bytes_transferred = transfer_snapshot.acknowledged_offset;
+            if (upgrade.cancel_requested != 0) {
+                upgrade.stage = IEC_UPGRADE_STAGE_CANCELING;
+                upgrade_progress_events.push_back(upgrade);
+            } else if (operation == IEC_FILE_OPERATION_CANCEL) {
+                upgrade.stage = IEC_UPGRADE_STAGE_CANCELED;
+                failed_upgrades.push_back(upgrade);
+            } else if (result_code == IEC_FILE_RESULT_COMPLETED || result_code == IEC_FILE_RESULT_ACCEPTED) {
+                upgrade.stage = IEC_UPGRADE_STAGE_TRANSFERRING;
+                if (upgrade.bytes_transferred < upgrade.total_size) {
+                    next_chunk_upgrades.push_back(upgrade);
+                } else if (result_code == IEC_FILE_RESULT_COMPLETED) {
+                    upgrade.stage = IEC_UPGRADE_STAGE_FINISHING;
+                    completed_upgrades.push_back(upgrade);
+                } else {
+                    upgrade_progress_events.push_back(upgrade);
+                }
+            } else {
+                upgrade.stage = IEC_UPGRADE_STAGE_FAILED;
+                failed_upgrades.push_back(upgrade);
+            }
+        }
+    }
+
+    for (auto event : next_chunk_upgrades) {
+        notify_upgrade_progress(
+            session,
+            event,
+            IEC_UPGRADE_STAGE_TRANSFERRING,
+            upgrade_progress_callback,
+            upgrade_user_context);
+
+        uint8_t frame[1536]{};
+        uint32_t frame_size = 0;
+        if (!build_upgrade_write_frame(
+                session,
+                event,
+                event.bytes_transferred,
+                frame,
+                frame_size,
+                sizeof(frame))) {
+            event.stage = IEC_UPGRADE_STAGE_FAILED;
+            notify_upgrade_progress(
+                session,
+                event,
+                IEC_UPGRADE_STAGE_FAILED,
+                upgrade_progress_callback,
+                upgrade_user_context);
+            notify_upgrade_result(
+                session,
+                event,
+                IEC_UPGRADE_RESULT_READ_FAILED,
+                IEC_UPGRADE_STAGE_FAILED,
+                cause,
+                0,
+                "failed to read upgrade image chunk",
+                upgrade_result_callback,
+                upgrade_user_context);
+            erase_upgrade_state(session, event.upgrade_id, event.transfer_id);
+            continue;
+        }
+
+        uint32_t ignored_id = 0;
+        const iec_status_t send_status = send_file_frame(session, frame, frame_size, event.transfer_id, true, &ignored_id);
+        if (send_status != IEC_STATUS_OK) {
+            event.stage = IEC_UPGRADE_STAGE_FAILED;
+            notify_upgrade_progress(
+                session,
+                event,
+                IEC_UPGRADE_STAGE_FAILED,
+                upgrade_progress_callback,
+                upgrade_user_context);
+            notify_upgrade_result(
+                session,
+                event,
+                IEC_UPGRADE_RESULT_TRANSFER_FAILED,
+                IEC_UPGRADE_STAGE_FAILED,
+                cause,
+                0,
+                "failed to send upgrade image chunk",
+                upgrade_result_callback,
+                upgrade_user_context);
+            erase_upgrade_state(session, event.upgrade_id, event.transfer_id);
+        }
+    }
+
+    for (const auto &event : upgrade_progress_events) {
+        notify_upgrade_progress(
+            session,
+            event,
+            IEC_UPGRADE_STAGE_TRANSFERRING,
+            upgrade_progress_callback,
+            upgrade_user_context);
+    }
+    for (const auto &event : completed_upgrades) {
+        notify_upgrade_progress(
+            session,
+            event,
+            IEC_UPGRADE_STAGE_FINISHING,
+            upgrade_progress_callback,
+            upgrade_user_context);
+        uint8_t finish_frame[64]{};
+        uint32_t finish_frame_size = 0;
+        AsduLayout finish_layout{};
+        if (begin_upgrade_control_frame(
+                session,
+                kUpgradeActionFinish,
+                event.common_address,
+                finish_frame,
+                finish_frame_size,
+                finish_layout)) {
+            write_uint_le(finish_frame, finish_frame_size, event.upgrade_id, 4);
+            write_uint_le(finish_frame, finish_frame_size, event.transfer_id, 4);
+            const iec_status_t send_status = send_upgrade_control_frame(
+                session,
+                finish_frame,
+                finish_frame_size,
+                event.command_timeout_ms);
+            if (send_status == IEC_STATUS_OK) {
+                set_upgrade_stage(session, event.upgrade_id, IEC_UPGRADE_STAGE_FINISHING);
+                continue;
+            }
+        }
+
+        iec_session_t::UpgradeOperation failed = event;
+        failed.stage = IEC_UPGRADE_STAGE_FAILED;
+        notify_upgrade_progress(
+            session,
+            failed,
+            IEC_UPGRADE_STAGE_FAILED,
+            upgrade_progress_callback,
+            upgrade_user_context);
+        notify_upgrade_result(
+            session,
+            failed,
+            IEC_UPGRADE_RESULT_TRANSFER_FAILED,
+            IEC_UPGRADE_STAGE_FAILED,
+            cause,
+            0,
+            "failed to send upgrade finish",
+            upgrade_result_callback,
+            upgrade_user_context);
+        erase_upgrade_state(session, event.upgrade_id, event.transfer_id);
+    }
+    for (const auto &event : failed_upgrades) {
+        const iec_upgrade_result_code_t mapped_result = upgrade_result_from_file_result(result_code);
+        const iec_upgrade_stage_t final_stage =
+            mapped_result == IEC_UPGRADE_RESULT_CANCELED ? IEC_UPGRADE_STAGE_CANCELED : IEC_UPGRADE_STAGE_FAILED;
+        finish_upgrade_operation(
+            session,
+            event,
+            mapped_result,
+            final_stage,
+            cause,
+            0,
+            nullptr);
+    }
+
+    if (!is_upgrade_transfer &&
+        (is_final || operation == IEC_FILE_OPERATION_CANCEL || operation == IEC_FILE_OPERATION_WRITE) &&
         result_callback != nullptr) {
         iec_file_operation_result_t result{};
         result.transfer_id = transfer_id;
@@ -1647,6 +2133,214 @@ void dispatch_file_messages(
         result.is_final = is_final ? 1U : 0U;
         result_callback(session, &result, user_context);
     }
+}
+
+void dispatch_upgrade_control_messages(
+    iec_session_t *session,
+    const uint8_t *payload,
+    uint32_t payload_size,
+    const AsduLayout &layout) noexcept
+{
+    if (payload == nullptr || payload_size < 2U + layout.cot_length + layout.common_address_length +
+            layout.information_object_address_length + 5U) {
+        return;
+    }
+    if (payload[0] != kAsduTypeUpgradeControl || (payload[1] & 0x7FU) == 0) {
+        return;
+    }
+
+    const uint32_t cause_offset = 2U;
+    const uint8_t raw_cause = payload[cause_offset];
+    const uint8_t cause = static_cast<uint8_t>(raw_cause & 0x3FU);
+    const uint32_t common_address_offset = cause_offset + layout.cot_length;
+    const uint16_t common_address =
+        read_uint16_le(payload + common_address_offset, layout.common_address_length);
+    const uint32_t info_offset = common_address_offset + layout.common_address_length;
+    uint32_t offset = info_offset + layout.information_object_address_length;
+
+    const uint8_t action = payload[offset++];
+    if (payload_size < offset + 4U) {
+        return;
+    }
+    const uint32_t upgrade_id = read_uint32_le(payload + offset, 4);
+    offset += 4;
+    const uint32_t response_transfer_id =
+        payload_size >= offset + 4U ? read_uint32_le(payload + offset, 4) : 0U;
+
+    iec_session_t::UpgradeOperation upgrade{};
+    iec_on_upgrade_progress_fn progress_callback = nullptr;
+    void *user_context = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        auto match = std::find_if(
+            session->upgrades.begin(),
+            session->upgrades.end(),
+            [upgrade_id, common_address](const iec_session_t::UpgradeOperation &item) {
+                return item.upgrade_id == upgrade_id && item.common_address == common_address;
+            });
+        if (match == session->upgrades.end()) {
+            return;
+        }
+        upgrade = *match;
+        progress_callback = session->callbacks.on_upgrade_progress;
+        user_context = session->config.user_context;
+    }
+
+    const auto fail_protocol = [&](const char *message) {
+        finish_upgrade_operation(
+            session,
+            upgrade,
+            IEC_UPGRADE_RESULT_PROTOCOL_ERROR,
+            IEC_UPGRADE_STAGE_FAILED,
+            cause,
+            0,
+            message);
+    };
+
+    if (response_transfer_id != 0 && response_transfer_id != upgrade.transfer_id) {
+        fail_protocol("upgrade control transfer id mismatch");
+        return;
+    }
+
+    if ((raw_cause & 0x40U) != 0) {
+        finish_upgrade_operation(
+            session,
+            upgrade,
+            IEC_UPGRADE_RESULT_NEGATIVE_CONFIRM,
+            IEC_UPGRADE_STAGE_FAILED,
+            cause,
+            0,
+            "upgrade control negative confirmation");
+        return;
+    }
+    if (cause != kCauseActivationConfirm && cause != kCauseActivationTermination) {
+        fail_protocol("unexpected upgrade control cause");
+        return;
+    }
+
+    if (action == kUpgradeActionStart) {
+        if (upgrade.cancel_requested != 0) {
+            return;
+        }
+
+        upgrade.stage = IEC_UPGRADE_STAGE_EXECUTING;
+        set_upgrade_stage(session, upgrade.upgrade_id, IEC_UPGRADE_STAGE_EXECUTING);
+        notify_upgrade_progress(
+            session,
+            upgrade,
+            IEC_UPGRADE_STAGE_EXECUTING,
+            progress_callback,
+            user_context);
+
+        uint8_t execute_frame[64]{};
+        uint32_t execute_frame_size = 0;
+        AsduLayout execute_layout{};
+        if (!begin_upgrade_control_frame(
+                session,
+                kUpgradeActionExecute,
+                upgrade.common_address,
+                execute_frame,
+                execute_frame_size,
+                execute_layout)) {
+            fail_protocol("failed to build upgrade execute");
+            return;
+        }
+        write_uint_le(execute_frame, execute_frame_size, upgrade.upgrade_id, 4);
+        write_uint_le(execute_frame, execute_frame_size, upgrade.transfer_id, 4);
+
+        const iec_status_t send_status = send_upgrade_control_frame(
+            session,
+            execute_frame,
+            execute_frame_size,
+            upgrade.command_timeout_ms);
+        if (send_status != IEC_STATUS_OK) {
+            finish_upgrade_operation(
+                session,
+                upgrade,
+                IEC_UPGRADE_RESULT_TRANSFER_FAILED,
+                IEC_UPGRADE_STAGE_FAILED,
+                cause,
+                0,
+                "failed to send upgrade execute");
+        }
+        return;
+    }
+
+    if (action == kUpgradeActionExecute) {
+        if (upgrade.cancel_requested != 0) {
+            return;
+        }
+
+        upgrade.stage = IEC_UPGRADE_STAGE_TRANSFERRING;
+        set_upgrade_stage(session, upgrade.upgrade_id, IEC_UPGRADE_STAGE_TRANSFERRING);
+        notify_upgrade_progress(
+            session,
+            upgrade,
+            IEC_UPGRADE_STAGE_TRANSFERRING,
+            progress_callback,
+            user_context);
+
+        uint8_t write_frame[1536]{};
+        uint32_t write_frame_size = 0;
+        if (!build_upgrade_write_frame(
+                session,
+                upgrade,
+                upgrade.bytes_transferred,
+                write_frame,
+                write_frame_size,
+                sizeof(write_frame))) {
+            finish_upgrade_operation(
+                session,
+                upgrade,
+                IEC_UPGRADE_RESULT_READ_FAILED,
+                IEC_UPGRADE_STAGE_FAILED,
+                cause,
+                0,
+                "failed to read upgrade image chunk");
+            return;
+        }
+
+        uint32_t ignored_id = 0;
+        const iec_status_t send_status =
+            send_file_frame(session, write_frame, write_frame_size, upgrade.transfer_id, true, &ignored_id);
+        if (send_status != IEC_STATUS_OK) {
+            finish_upgrade_operation(
+                session,
+                upgrade,
+                IEC_UPGRADE_RESULT_TRANSFER_FAILED,
+                IEC_UPGRADE_STAGE_FAILED,
+                cause,
+                0,
+                "failed to send upgrade image chunk");
+        }
+        return;
+    }
+
+    if (action == kUpgradeActionFinish) {
+        finish_upgrade_operation(
+            session,
+            upgrade,
+            IEC_UPGRADE_RESULT_COMPLETED,
+            IEC_UPGRADE_STAGE_COMPLETED,
+            cause,
+            0,
+            nullptr);
+        return;
+    }
+
+    if (action == kUpgradeActionCancel) {
+        finish_upgrade_operation(
+            session,
+            upgrade,
+            IEC_UPGRADE_RESULT_CANCELED,
+            IEC_UPGRADE_STAGE_CANCELED,
+            cause,
+            0,
+            nullptr);
+        return;
+    }
+
+    fail_protocol("unknown upgrade control action");
 }
 
 void dispatch_point_indications(
@@ -1843,6 +2537,11 @@ void receive_worker(iec_session_t *session) noexcept
             layout,
             device_description_callback,
             user_context);
+        dispatch_upgrade_control_messages(
+            session,
+            buffer.data(),
+            received,
+            layout);
         dispatch_file_messages(
             session,
             buffer.data(),
@@ -3026,6 +3725,34 @@ bool begin_file_frame(
     return true;
 }
 
+bool begin_upgrade_control_frame(
+    iec_session_t *session,
+    uint8_t action,
+    uint16_t common_address,
+    uint8_t *frame,
+    uint32_t &frame_size,
+    AsduLayout &layout) noexcept
+{
+    std::lock_guard<std::mutex> lock(session->mutex);
+    layout = get_asdu_layout(*session);
+    if (layout.cot_length == 0 || layout.common_address_length == 0 ||
+        layout.information_object_address_length == 0 ||
+        !fits_uint_le(common_address, layout.common_address_length)) {
+        return false;
+    }
+
+    frame[frame_size++] = kAsduTypeUpgradeControl;
+    frame[frame_size++] = 1;
+    write_uint_le(frame, frame_size, kCauseActivation, 1);
+    if (layout.cot_length == 2) {
+        write_uint_le(frame, frame_size, kDefaultOriginatorAddress, 1);
+    }
+    write_uint_le(frame, frame_size, common_address, layout.common_address_length);
+    write_uint_le(frame, frame_size, kUpgradeChannelInformationObjectAddress, layout.information_object_address_length);
+    frame[frame_size++] = action;
+    return true;
+}
+
 iec_status_t send_file_frame(
     iec_session_t *session,
     const uint8_t *frame,
@@ -3098,6 +3825,120 @@ iec_status_t send_file_frame(
     }
 
     return IEC_STATUS_OK;
+}
+
+iec_status_t send_upgrade_control_frame(
+    iec_session_t *session,
+    const uint8_t *frame,
+    uint32_t frame_size,
+    uint32_t timeout_ms) noexcept
+{
+    iec_transport_t transport{};
+    iec_on_raw_asdu_fn raw_callback = nullptr;
+    void *user_context = nullptr;
+    bool raw_enabled = false;
+    AsduLayout layout{};
+
+    {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        if (session->state != IEC_RUNTIME_RUNNING) {
+            return IEC_STATUS_BAD_STATE;
+        }
+        if (frame_size > session->transport.max_plain_frame_len) {
+            return IEC_STATUS_INVALID_ARGUMENT;
+        }
+        transport = session->transport;
+        raw_callback = session->callbacks.on_raw_asdu;
+        user_context = session->config.user_context;
+        raw_enabled = session->config.enable_raw_asdu != 0;
+        layout = get_asdu_layout(*session);
+    }
+
+    const int send_result = transport.send(transport.ctx, frame, frame_size, timeout_ms);
+    if (send_result != 0) {
+        return IEC_STATUS_IO_ERROR;
+    }
+
+    if (raw_enabled) {
+        notify_raw_asdu(
+            session,
+            IEC_RAW_ASDU_TX,
+            frame,
+            frame_size,
+            layout,
+            raw_callback,
+            user_context);
+    }
+
+    return IEC_STATUS_OK;
+}
+
+bool build_upgrade_write_frame(
+    iec_session_t *session,
+    const iec_session_t::UpgradeOperation &upgrade,
+    uint32_t offset,
+    uint8_t *frame,
+    uint32_t &frame_size,
+    uint32_t frame_capacity) noexcept
+{
+    frame_size = 0;
+    AsduLayout layout{};
+    if (!begin_file_frame(
+            session,
+            IEC_FILE_OPERATION_WRITE,
+            upgrade.common_address,
+            upgrade.overwrite_existing != 0 && offset == 0 ? 0x02U : 0U,
+            frame,
+            frame_size,
+            layout) ||
+        !append_string_field(
+            frame,
+            frame_size,
+            frame_capacity,
+            upgrade.remote_directory.c_str(),
+            kMaxFileNameBytes) ||
+        !append_string_field(
+            frame,
+            frame_size,
+            frame_capacity,
+            upgrade.remote_file_name.c_str(),
+            kMaxFileNameBytes)) {
+        return false;
+    }
+
+    const uint32_t remaining = upgrade.total_size > offset ? upgrade.total_size - offset : 0;
+    const uint32_t requested = std::min<uint32_t>(remaining, upgrade.chunk_size);
+    if (requested == 0 || frame_capacity < frame_size + 20U + requested) {
+        return false;
+    }
+
+    std::vector<uint8_t> chunk;
+    try {
+        chunk.resize(requested);
+    } catch (...) {
+        return false;
+    }
+    uint32_t content_size = 0;
+    if (upgrade.image.read(
+            upgrade.image.ctx,
+            offset,
+            chunk.data(),
+            requested,
+            &content_size) != 0 ||
+        content_size == 0 ||
+        content_size > requested ||
+        content_size > remaining) {
+        return false;
+    }
+
+    write_uint_le(frame, frame_size, upgrade.transfer_id, 4);
+    write_uint_le(frame, frame_size, offset, 4);
+    write_uint_le(frame, frame_size, upgrade.total_size, 4);
+    write_uint_le(frame, frame_size, upgrade.chunk_size, 4);
+    write_uint_le(frame, frame_size, content_size, 4);
+    std::memcpy(frame + frame_size, chunk.data(), content_size);
+    frame_size += content_size;
+    return true;
 }
 
 } // namespace
@@ -3401,6 +4242,246 @@ iec_status_t cancel_file_transfer(iec_session_t *session, uint32_t transfer_id) 
         result.total_size = transfer_snapshot.total_size;
         result.is_final = 1;
         result_callback(session, &result, user_context);
+    }
+
+    return IEC_STATUS_OK;
+}
+
+iec_status_t upgrade_firmware(
+    iec_session_t *session,
+    const iec_upgrade_request_t *request,
+    uint32_t *out_upgrade_id) noexcept
+{
+    if (out_upgrade_id != nullptr) {
+        *out_upgrade_id = 0;
+    }
+    if (session == nullptr || request == nullptr || out_upgrade_id == nullptr ||
+        !validate_upgrade_request(*request)) {
+        return IEC_STATUS_INVALID_ARGUMENT;
+    }
+
+    uint8_t start_frame[384]{};
+    uint32_t start_frame_size = 0;
+    AsduLayout layout{};
+    if (!begin_upgrade_control_frame(
+            session,
+            kUpgradeActionStart,
+            request->common_address,
+            start_frame,
+            start_frame_size,
+            layout)) {
+        return IEC_STATUS_INVALID_ARGUMENT;
+    }
+
+    uint32_t upgrade_id = 0;
+    uint32_t transfer_id = 0;
+    uint32_t chunk_size = 0;
+    uint32_t command_timeout_ms = request->command_timeout_ms;
+    uint32_t transfer_timeout_ms = request->transfer_timeout_ms;
+    {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        if (session->state != IEC_RUNTIME_RUNNING) {
+            return IEC_STATUS_BAD_STATE;
+        }
+        if (!fits_uint_le(request->common_address, layout.common_address_length)) {
+            return IEC_STATUS_INVALID_ARGUMENT;
+        }
+        chunk_size = effective_file_chunk_size(*session, request->preferred_chunk_size);
+        if (chunk_size == 0) {
+            return IEC_STATUS_INVALID_ARGUMENT;
+        }
+        const uint32_t directory_length = static_cast<uint32_t>(std::strlen(request->remote_directory));
+        const uint32_t file_name_length = static_cast<uint32_t>(std::strlen(request->remote_file_name));
+        const uint32_t file_frame_overhead =
+            2U + layout.cot_length + layout.common_address_length +
+            layout.information_object_address_length + 2U + 1U + directory_length +
+            1U + file_name_length + 20U;
+        if (chunk_size + file_frame_overhead > session->transport.max_plain_frame_len) {
+            chunk_size = session->transport.max_plain_frame_len > file_frame_overhead
+                ? session->transport.max_plain_frame_len - file_frame_overhead
+                : 0;
+        }
+        if (chunk_size == 0) {
+            return IEC_STATUS_INVALID_ARGUMENT;
+        }
+        if (command_timeout_ms == 0) {
+            command_timeout_ms = session->config.command_timeout_ms;
+        }
+        if (transfer_timeout_ms == 0) {
+            transfer_timeout_ms = session->config.command_timeout_ms;
+        }
+        upgrade_id = take_next_upgrade_id(*session);
+        transfer_id = take_next_transfer_id(*session);
+    }
+
+    write_uint_le(start_frame, start_frame_size, upgrade_id, 4);
+    write_uint_le(start_frame, start_frame_size, request->image.total_size, 4);
+    (void)layout;
+    if (!append_string_field(
+            start_frame,
+            start_frame_size,
+            sizeof(start_frame),
+            request->remote_directory,
+            kMaxFileNameBytes) ||
+        !append_string_field(
+            start_frame,
+            start_frame_size,
+            sizeof(start_frame),
+            request->remote_file_name,
+            kMaxFileNameBytes) ||
+        !append_optional_string_field(
+            start_frame,
+            start_frame_size,
+            sizeof(start_frame),
+            request->checksum_text,
+            kMaxUpgradeChecksumBytes)) {
+        return IEC_STATUS_INVALID_ARGUMENT;
+    }
+
+    iec_on_upgrade_progress_fn progress_callback = nullptr;
+    void *user_context = nullptr;
+    iec_session_t::UpgradeOperation upgrade{};
+    {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        if (session->state != IEC_RUNTIME_RUNNING) {
+            return IEC_STATUS_BAD_STATE;
+        }
+        upgrade.upgrade_id = upgrade_id;
+        upgrade.transfer_id = transfer_id;
+        upgrade.stage = IEC_UPGRADE_STAGE_STARTING;
+        upgrade.common_address = request->common_address;
+        upgrade.remote_directory = request->remote_directory;
+        upgrade.remote_file_name = request->remote_file_name;
+        if (request->checksum_text != nullptr) {
+            upgrade.checksum_text = request->checksum_text;
+        }
+        upgrade.image = request->image;
+        upgrade.chunk_size = chunk_size;
+        upgrade.total_size = request->image.total_size;
+        upgrade.bytes_transferred = 0;
+        upgrade.command_timeout_ms = command_timeout_ms;
+        upgrade.transfer_timeout_ms = transfer_timeout_ms;
+        upgrade.overwrite_existing = request->overwrite_existing;
+        session->upgrades.push_back(upgrade);
+        session->file_transfers.push_back(iec_session_t::FileTransfer{
+            transfer_id,
+            IEC_FILE_TRANSFER_DIRECTION_WRITE,
+            IEC_FILE_TRANSFER_STATE_ACCEPTED,
+            request->common_address,
+            request->remote_directory,
+            request->remote_file_name,
+            request->image.total_size,
+            0,
+            1,
+            IEC_FILE_RESULT_ACCEPTED,
+            0,
+            0,
+        });
+        progress_callback = session->callbacks.on_upgrade_progress;
+        user_context = session->config.user_context;
+    }
+
+    notify_upgrade_progress(
+        session,
+        upgrade,
+        IEC_UPGRADE_STAGE_STARTING,
+        progress_callback,
+        user_context);
+
+    iec_status_t send_status =
+        send_upgrade_control_frame(session, start_frame, start_frame_size, command_timeout_ms);
+    if (send_status != IEC_STATUS_OK) {
+        finish_upgrade_operation(
+            session,
+            upgrade,
+            IEC_UPGRADE_RESULT_TRANSFER_FAILED,
+            IEC_UPGRADE_STAGE_FAILED,
+            0,
+            0,
+            "failed to send upgrade start");
+        return send_status;
+    }
+
+    upgrade.stage = IEC_UPGRADE_STAGE_WAIT_START_CONFIRM;
+    set_upgrade_stage(session, upgrade_id, IEC_UPGRADE_STAGE_WAIT_START_CONFIRM);
+    notify_upgrade_progress(
+        session,
+        upgrade,
+        IEC_UPGRADE_STAGE_WAIT_START_CONFIRM,
+        progress_callback,
+        user_context);
+
+    *out_upgrade_id = upgrade_id;
+    return IEC_STATUS_OK;
+}
+
+iec_status_t cancel_upgrade(iec_session_t *session, uint32_t upgrade_id) noexcept
+{
+    if (session == nullptr || upgrade_id == 0) {
+        return IEC_STATUS_INVALID_ARGUMENT;
+    }
+
+    iec_session_t::UpgradeOperation upgrade{};
+    iec_on_upgrade_progress_fn progress_callback = nullptr;
+    void *user_context = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(session->mutex);
+        if (session->state != IEC_RUNTIME_RUNNING) {
+            return IEC_STATUS_BAD_STATE;
+        }
+        auto match = std::find_if(
+            session->upgrades.begin(),
+            session->upgrades.end(),
+            [upgrade_id](const iec_session_t::UpgradeOperation &item) {
+                return item.upgrade_id == upgrade_id;
+            });
+        if (match == session->upgrades.end()) {
+            return IEC_STATUS_INVALID_ARGUMENT;
+        }
+        match->stage = IEC_UPGRADE_STAGE_CANCELING;
+        match->cancel_requested = 1;
+        upgrade = *match;
+        progress_callback = session->callbacks.on_upgrade_progress;
+        user_context = session->config.user_context;
+    }
+
+    notify_upgrade_progress(
+        session,
+        upgrade,
+        IEC_UPGRADE_STAGE_CANCELING,
+        progress_callback,
+        user_context);
+
+    uint8_t cancel_frame[64]{};
+    uint32_t cancel_frame_size = 0;
+    AsduLayout layout{};
+    if (!begin_upgrade_control_frame(
+            session,
+            kUpgradeActionCancel,
+            upgrade.common_address,
+            cancel_frame,
+            cancel_frame_size,
+            layout)) {
+        return IEC_STATUS_INVALID_ARGUMENT;
+    }
+    write_uint_le(cancel_frame, cancel_frame_size, upgrade_id, 4);
+    write_uint_le(cancel_frame, cancel_frame_size, upgrade.transfer_id, 4);
+
+    const iec_status_t send_status = send_upgrade_control_frame(
+        session,
+        cancel_frame,
+        cancel_frame_size,
+        upgrade.command_timeout_ms);
+    if (send_status != IEC_STATUS_OK) {
+        finish_upgrade_operation(
+            session,
+            upgrade,
+            IEC_UPGRADE_RESULT_TRANSFER_FAILED,
+            IEC_UPGRADE_STAGE_FAILED,
+            0,
+            0,
+            "failed to send upgrade cancel");
+        return send_status;
     }
 
     return IEC_STATUS_OK;

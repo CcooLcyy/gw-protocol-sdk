@@ -124,6 +124,7 @@ struct MockTransport {
     uint32_t send_count = 0;
     uint32_t recv_count = 0;
     std::vector<uint8_t> last_sent;
+    std::vector<std::vector<uint8_t>> sent_history;
     std::vector<std::vector<uint8_t>> recv_queue;
 };
 
@@ -136,12 +137,16 @@ int mock_send(void *ctx, const uint8_t *data, uint32_t len, uint32_t timeout_ms)
         return -1;
     }
 
-    std::lock_guard<std::mutex> lock(transport->mutex);
-    if (transport->closed) {
-        return -1;
+    {
+        std::lock_guard<std::mutex> lock(transport->mutex);
+        if (transport->closed) {
+            return -1;
+        }
+        ++transport->send_count;
+        transport->last_sent.assign(data, data + len);
+        transport->sent_history.push_back(transport->last_sent);
     }
-    ++transport->send_count;
-    transport->last_sent.assign(data, data + len);
+    transport->cv.notify_all();
     return 0;
 }
 
@@ -185,6 +190,26 @@ void push_recv(MockTransport &transport, std::vector<uint8_t> frame)
         transport.recv_queue.push_back(std::move(frame));
     }
     transport.cv.notify_all();
+}
+
+bool wait_until_sent_count(MockTransport &transport, std::size_t count)
+{
+    std::unique_lock<std::mutex> lock(transport.mutex);
+    return transport.cv.wait_for(lock, kStateWaitTimeout, [&] {
+        return transport.sent_history.size() >= count;
+    });
+}
+
+std::vector<std::vector<uint8_t>> sent_history_snapshot(MockTransport &transport)
+{
+    std::lock_guard<std::mutex> lock(transport.mutex);
+    return transport.sent_history;
+}
+
+std::vector<uint8_t> last_sent_snapshot(MockTransport &transport)
+{
+    std::lock_guard<std::mutex> lock(transport.mutex);
+    return transport.last_sent;
 }
 
 void close_transport(MockTransport &transport)
@@ -280,6 +305,19 @@ struct StateRecorder {
     };
 
     std::vector<FileResultEvent> file_results;
+
+    struct UpgradeProgressEvent {
+        iec_upgrade_progress_t progress{};
+    };
+
+    std::vector<UpgradeProgressEvent> upgrade_progress;
+
+    struct UpgradeResultEvent {
+        iec_upgrade_result_t result{};
+        std::string detail_message;
+    };
+
+    std::vector<UpgradeResultEvent> upgrade_results;
 
     void record(iec_runtime_state_t state)
     {
@@ -426,6 +464,31 @@ struct StateRecorder {
         cv.notify_all();
     }
 
+    void record_upgrade_progress(const iec_upgrade_progress_t &progress)
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            upgrade_progress.push_back(UpgradeProgressEvent{progress});
+        }
+        cv.notify_all();
+    }
+
+    void record_upgrade_result(const iec_upgrade_result_t &result)
+    {
+        UpgradeResultEvent snapshot{};
+        snapshot.result = result;
+        if (result.detail_message != nullptr) {
+            snapshot.detail_message = result.detail_message;
+            snapshot.result.detail_message = snapshot.detail_message.c_str();
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            upgrade_results.push_back(std::move(snapshot));
+        }
+        cv.notify_all();
+    }
+
     void record_raw(const iec_raw_asdu_event_t &event)
     {
         RawAsduEvent snapshot{};
@@ -530,6 +593,18 @@ struct StateRecorder {
         return file_results;
     }
 
+    std::vector<UpgradeProgressEvent> upgrade_progress_snapshot() const
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        return upgrade_progress;
+    }
+
+    std::vector<UpgradeResultEvent> upgrade_result_snapshot() const
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        return upgrade_results;
+    }
+
     bool wait_until_contains(iec_runtime_state_t state)
     {
         std::unique_lock<std::mutex> lock(mutex);
@@ -607,6 +682,22 @@ struct StateRecorder {
         std::unique_lock<std::mutex> lock(mutex);
         return cv.wait_for(lock, kStateWaitTimeout, [&] {
             return file_results.size() >= count;
+        });
+    }
+
+    bool wait_until_upgrade_progress_count(std::size_t count)
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        return cv.wait_for(lock, kStateWaitTimeout, [&] {
+            return upgrade_progress.size() >= count;
+        });
+    }
+
+    bool wait_until_upgrade_result_count(std::size_t count)
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        return cv.wait_for(lock, kStateWaitTimeout, [&] {
+            return upgrade_results.size() >= count;
         });
     }
 };
@@ -740,6 +831,32 @@ void on_file_operation_result(
     recorder->record_file_result(*result);
 }
 
+void on_upgrade_progress(
+    iec_session_t *session,
+    const iec_upgrade_progress_t *progress,
+    void *user_context)
+{
+    (void)session;
+    auto *recorder = static_cast<StateRecorder *>(user_context);
+    if (recorder == nullptr || progress == nullptr) {
+        return;
+    }
+    recorder->record_upgrade_progress(*progress);
+}
+
+void on_upgrade_result(
+    iec_session_t *session,
+    const iec_upgrade_result_t *result,
+    void *user_context)
+{
+    (void)session;
+    auto *recorder = static_cast<StateRecorder *>(user_context);
+    if (recorder == nullptr || result == nullptr) {
+        return;
+    }
+    recorder->record_upgrade_result(*result);
+}
+
 iec_session_config_t make_common_config(StateRecorder &recorder)
 {
     iec_session_config_t config{};
@@ -778,6 +895,8 @@ iec_callbacks_t make_callbacks()
     callbacks.on_file_list_indication = on_file_list_indication;
     callbacks.on_file_data_indication = on_file_data_indication;
     callbacks.on_file_operation_result = on_file_operation_result;
+    callbacks.on_upgrade_progress = on_upgrade_progress;
+    callbacks.on_upgrade_result = on_upgrade_result;
     return callbacks;
 }
 
@@ -2254,6 +2373,257 @@ void exercise_file_transfer(
     std::printf("  %s file_transfer\n", name);
 }
 
+struct FirmwareImage {
+    std::vector<uint8_t> data;
+};
+
+int GW_PROTOCOL_CALL read_upgrade_chunk(
+    void *ctx,
+    uint32_t offset,
+    uint8_t *buffer,
+    uint32_t capacity,
+    uint32_t *out_len)
+{
+    auto *image = static_cast<FirmwareImage *>(ctx);
+    if (image == nullptr || out_len == nullptr || (capacity > 0 && buffer == nullptr)) {
+        return -1;
+    }
+    if (offset >= image->data.size()) {
+        *out_len = 0;
+        return 0;
+    }
+    const uint32_t remaining = static_cast<uint32_t>(image->data.size() - offset);
+    const uint32_t count = std::min<uint32_t>(remaining, capacity);
+    std::copy(image->data.begin() + offset, image->data.begin() + offset + count, buffer);
+    *out_len = count;
+    return 0;
+}
+
+template <
+    typename Config,
+    typename CreateFn,
+    typename DestroyFn,
+    typename StartFn,
+    typename StopFn,
+    typename UpgradeFn,
+    typename CancelUpgradeFn>
+void exercise_upgrade(
+    const char *name,
+    const Config &protocol_config,
+    CreateFn create,
+    DestroyFn destroy,
+    StartFn start,
+    StopFn stop,
+    UpgradeFn upgrade_firmware,
+    CancelUpgradeFn cancel_upgrade)
+{
+    StateRecorder recorder;
+    MockTransport mock;
+    auto common = make_common_config(recorder);
+    auto transport = make_transport(mock);
+    transport.max_plain_frame_len = 512;
+    auto callbacks = make_callbacks();
+
+    FirmwareImage image{{0x10, 0x20, 0x30, 0x40, 0x50, 0x60}};
+    iec_upgrade_request_t request{};
+    request.common_address = 1;
+    request.remote_directory = "/upgrade";
+    request.remote_file_name = "fw.bin";
+    request.image.ctx = &image;
+    request.image.total_size = static_cast<uint32_t>(image.data.size());
+    request.image.read = read_upgrade_chunk;
+    request.preferred_chunk_size = 4;
+    request.checksum_text = "md5";
+    request.overwrite_existing = 1;
+    request.command_timeout_ms = 1000;
+    request.transfer_timeout_ms = 1000;
+
+    const std::vector<uint8_t> expected_start{
+        211, 1, 6, 0, 1, 0, 0, 0, 0, 1,
+        1, 0, 0, 0,
+        6, 0, 0, 0,
+        8, '/', 'u', 'p', 'g', 'r', 'a', 'd', 'e',
+        6, 'f', 'w', '.', 'b', 'i', 'n',
+        3, 'm', 'd', '5',
+    };
+    const std::vector<uint8_t> expected_start_cancel{
+        211, 1, 6, 0, 1, 0, 0, 0, 0, 1,
+        2, 0, 0, 0,
+        6, 0, 0, 0,
+        8, '/', 'u', 'p', 'g', 'r', 'a', 'd', 'e',
+        6, 'f', 'w', '.', 'b', 'i', 'n',
+        3, 'm', 'd', '5',
+    };
+    const std::vector<uint8_t> start_confirm{
+        211, 1, 7, 0, 1, 0, 0, 0, 0, 1,
+        1, 0, 0, 0,
+    };
+    const std::vector<uint8_t> expected_execute{
+        211, 1, 6, 0, 1, 0, 0, 0, 0, 2,
+        1, 0, 0, 0,
+        1, 0, 0, 0,
+    };
+    const std::vector<uint8_t> execute_confirm{
+        211, 1, 7, 0, 1, 0, 0, 0, 0, 2,
+        1, 0, 0, 0,
+        1, 0, 0, 0,
+    };
+    const std::vector<uint8_t> expected_write{
+        208, 1, 6, 0, 1, 0, 0, 0, 0, 2, 0,
+        8, '/', 'u', 'p', 'g', 'r', 'a', 'd', 'e',
+        6, 'f', 'w', '.', 'b', 'i', 'n',
+        1, 0, 0, 0,
+        0, 0, 0, 0,
+        6, 0, 0, 0,
+        4, 0, 0, 0,
+        4, 0, 0, 0,
+        0x10, 0x20, 0x30, 0x40,
+    };
+    const std::vector<uint8_t> expected_write_second{
+        208, 1, 6, 0, 1, 0, 0, 0, 0, 0, 0,
+        8, '/', 'u', 'p', 'g', 'r', 'a', 'd', 'e',
+        6, 'f', 'w', '.', 'b', 'i', 'n',
+        1, 0, 0, 0,
+        4, 0, 0, 0,
+        6, 0, 0, 0,
+        4, 0, 0, 0,
+        2, 0, 0, 0,
+        0x50, 0x60,
+    };
+    const std::vector<uint8_t> write_response{
+        208, 1, 10, 0, 1, 0, 0, 0, 0, 1, 2,
+        1, 0, 0, 0,
+        4, 0, 0, 0,
+        6, 0, 0, 0,
+    };
+    const std::vector<uint8_t> write_response_final{
+        208, 1, 10, 0, 1, 0, 0, 0, 0, 1, 2,
+        1, 0, 0, 0,
+        6, 0, 0, 0,
+        4, 0, 0, 0,
+    };
+    const std::vector<uint8_t> expected_finish{
+        211, 1, 6, 0, 1, 0, 0, 0, 0, 3,
+        1, 0, 0, 0,
+        1, 0, 0, 0,
+    };
+    const std::vector<uint8_t> finish_confirm{
+        211, 1, 7, 0, 1, 0, 0, 0, 0, 3,
+        1, 0, 0, 0,
+        1, 0, 0, 0,
+    };
+    const std::vector<uint8_t> expected_cancel{
+        211, 1, 6, 0, 1, 0, 0, 0, 0, 4,
+        2, 0, 0, 0,
+        2, 0, 0, 0,
+    };
+    const std::vector<uint8_t> cancel_confirm{
+        211, 1, 7, 0, 1, 0, 0, 0, 0, 4,
+        2, 0, 0, 0,
+        2, 0, 0, 0,
+    };
+
+    uint32_t upgrade_id = 99;
+    EXPECT_STATUS(upgrade_firmware(nullptr, &request, &upgrade_id), IEC_STATUS_INVALID_ARGUMENT);
+    EXPECT_TRUE(upgrade_id == 0);
+    EXPECT_STATUS(cancel_upgrade(nullptr, 1), IEC_STATUS_INVALID_ARGUMENT);
+
+    iec_session_t *session = nullptr;
+    EXPECT_STATUS(create(&common, &protocol_config, &transport, &callbacks, &session), IEC_STATUS_OK);
+    EXPECT_TRUE(session != nullptr);
+
+    auto cleanup = [&] {
+        if (session != nullptr) {
+            (void)stop(session, 100);
+            (void)destroy(session);
+            session = nullptr;
+        }
+        close_transport(mock);
+    };
+
+    try {
+        auto invalid_request = request;
+        invalid_request.remote_file_name = "";
+        EXPECT_STATUS(upgrade_firmware(session, nullptr, &upgrade_id), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(upgrade_firmware(session, &invalid_request, &upgrade_id), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(upgrade_firmware(session, &request, &upgrade_id), IEC_STATUS_BAD_STATE);
+        EXPECT_TRUE(upgrade_id == 0);
+        EXPECT_STATUS(cancel_upgrade(session, 1), IEC_STATUS_BAD_STATE);
+
+        EXPECT_STATUS(start(session), IEC_STATUS_OK);
+        EXPECT_TRUE(recorder.wait_until_contains(IEC_RUNTIME_RUNNING));
+
+        EXPECT_STATUS(upgrade_firmware(session, &request, &upgrade_id), IEC_STATUS_OK);
+        EXPECT_TRUE(upgrade_id == 1);
+        EXPECT_TRUE(wait_until_sent_count(mock, 1));
+        auto sent = sent_history_snapshot(mock);
+        EXPECT_TRUE(sent.size() == 1);
+        EXPECT_TRUE(sent[0] == expected_start);
+        const auto progress = recorder.upgrade_progress_snapshot();
+        EXPECT_TRUE(progress.size() >= 2);
+        EXPECT_TRUE(progress[0].progress.upgrade_id == 1);
+        EXPECT_TRUE(progress[0].progress.stage == IEC_UPGRADE_STAGE_STARTING);
+        EXPECT_TRUE(progress[1].progress.stage == IEC_UPGRADE_STAGE_WAIT_START_CONFIRM);
+
+        push_recv(mock, start_confirm);
+        EXPECT_TRUE(wait_until_sent_count(mock, 2));
+        sent = sent_history_snapshot(mock);
+        EXPECT_TRUE(sent[1] == expected_execute);
+        EXPECT_TRUE(recorder.wait_until_upgrade_progress_count(3));
+        EXPECT_TRUE(recorder.upgrade_progress_snapshot()[2].progress.stage == IEC_UPGRADE_STAGE_EXECUTING);
+
+        push_recv(mock, execute_confirm);
+        EXPECT_TRUE(wait_until_sent_count(mock, 3));
+        sent = sent_history_snapshot(mock);
+        EXPECT_TRUE(sent[2] == expected_write);
+        EXPECT_TRUE(last_sent_snapshot(mock) == expected_write);
+
+        push_recv(mock, write_response);
+        EXPECT_TRUE(wait_until_sent_count(mock, 4));
+        sent = sent_history_snapshot(mock);
+        EXPECT_TRUE(sent[3] == expected_write_second);
+        push_recv(mock, write_response_final);
+        EXPECT_TRUE(wait_until_sent_count(mock, 5));
+        sent = sent_history_snapshot(mock);
+        EXPECT_TRUE(sent[4] == expected_finish);
+        push_recv(mock, finish_confirm);
+        EXPECT_TRUE(recorder.wait_until_upgrade_result_count(1));
+        const auto results = recorder.upgrade_result_snapshot();
+        EXPECT_TRUE(results.size() == 1);
+        EXPECT_TRUE(results[0].result.upgrade_id == 1);
+        EXPECT_TRUE(results[0].result.result == IEC_UPGRADE_RESULT_COMPLETED);
+        EXPECT_TRUE(results[0].result.final_stage == IEC_UPGRADE_STAGE_COMPLETED);
+        EXPECT_TRUE(results[0].result.bytes_transferred == 6);
+        const auto after_complete = recorder.upgrade_progress_snapshot();
+        EXPECT_TRUE(after_complete.back().progress.stage == IEC_UPGRADE_STAGE_COMPLETED);
+        EXPECT_TRUE(after_complete.back().progress.percent == 100);
+
+        EXPECT_STATUS(upgrade_firmware(session, &request, &upgrade_id), IEC_STATUS_OK);
+        EXPECT_TRUE(upgrade_id == 2);
+        EXPECT_TRUE(wait_until_sent_count(mock, 6));
+        sent = sent_history_snapshot(mock);
+        EXPECT_TRUE(sent[5] == expected_start_cancel);
+        EXPECT_STATUS(cancel_upgrade(session, upgrade_id), IEC_STATUS_OK);
+        EXPECT_TRUE(wait_until_sent_count(mock, 7));
+        EXPECT_TRUE(last_sent_snapshot(mock) == expected_cancel);
+        push_recv(mock, cancel_confirm);
+        EXPECT_TRUE(recorder.wait_until_upgrade_result_count(2));
+        const auto cancel_results = recorder.upgrade_result_snapshot();
+        EXPECT_TRUE(cancel_results[1].result.upgrade_id == 2);
+        EXPECT_TRUE(cancel_results[1].result.result == IEC_UPGRADE_RESULT_CANCELED);
+
+        EXPECT_STATUS(stop(session, 1000), IEC_STATUS_OK);
+        EXPECT_STATUS(destroy(session), IEC_STATUS_OK);
+        session = nullptr;
+        close_transport(mock);
+    } catch (...) {
+        cleanup();
+        throw;
+    }
+
+    std::printf("  %s upgrade\n", name);
+}
+
 void test_iec101_validate_config()
 {
     auto valid = make_iec101_config();
@@ -2504,6 +2874,30 @@ void test_iec101_file_transfer()
         },
         [](iec_session_t *session, uint32_t transfer_id) {
             return iec101_cancel_file_transfer(session, transfer_id);
+        });
+}
+
+void test_iec101_upgrade()
+{
+    const auto valid = make_iec101_config();
+    exercise_upgrade(
+        "iec101",
+        valid,
+        [](const iec_session_config_t *common,
+           const iec101_master_config_t *config,
+           const iec_transport_t *transport,
+           const iec_callbacks_t *callbacks,
+           iec_session_t **out_session) {
+            return iec101_create(common, config, transport, callbacks, out_session);
+        },
+        [](iec_session_t *session) { return iec101_destroy(session); },
+        [](iec_session_t *session) { return iec101_start(session); },
+        [](iec_session_t *session, uint32_t timeout_ms) { return iec101_stop(session, timeout_ms); },
+        [](iec_session_t *session, const iec_upgrade_request_t *request, uint32_t *out_upgrade_id) {
+            return iec101_upgrade_firmware(session, request, out_upgrade_id);
+        },
+        [](iec_session_t *session, uint32_t upgrade_id) {
+            return iec101_cancel_upgrade(session, upgrade_id);
         });
 }
 
@@ -2760,6 +3154,30 @@ void test_m101_file_transfer()
         });
 }
 
+void test_m101_upgrade()
+{
+    const auto valid = make_m101_config();
+    exercise_upgrade(
+        "m101",
+        valid,
+        [](const iec_session_config_t *common,
+           const m101_master_config_t *config,
+           const iec_transport_t *transport,
+           const iec_callbacks_t *callbacks,
+           iec_session_t **out_session) {
+            return m101_create(common, config, transport, callbacks, out_session);
+        },
+        [](iec_session_t *session) { return m101_destroy(session); },
+        [](iec_session_t *session) { return m101_start(session); },
+        [](iec_session_t *session, uint32_t timeout_ms) { return m101_stop(session, timeout_ms); },
+        [](iec_session_t *session, const iec_upgrade_request_t *request, uint32_t *out_upgrade_id) {
+            return m101_upgrade_firmware(session, request, out_upgrade_id);
+        },
+        [](iec_session_t *session, uint32_t upgrade_id) {
+            return m101_cancel_upgrade(session, upgrade_id);
+        });
+}
+
 void test_iec104_validate_config()
 {
     auto valid = make_iec104_config();
@@ -3013,6 +3431,30 @@ void test_iec104_file_transfer()
         });
 }
 
+void test_iec104_upgrade()
+{
+    const auto valid = make_iec104_config();
+    exercise_upgrade(
+        "iec104",
+        valid,
+        [](const iec_session_config_t *common,
+           const iec104_master_config_t *config,
+           const iec_transport_t *transport,
+           const iec_callbacks_t *callbacks,
+           iec_session_t **out_session) {
+            return iec104_create(common, config, transport, callbacks, out_session);
+        },
+        [](iec_session_t *session) { return iec104_destroy(session); },
+        [](iec_session_t *session) { return iec104_start(session); },
+        [](iec_session_t *session, uint32_t timeout_ms) { return iec104_stop(session, timeout_ms); },
+        [](iec_session_t *session, const iec_upgrade_request_t *request, uint32_t *out_upgrade_id) {
+            return iec104_upgrade_firmware(session, request, out_upgrade_id);
+        },
+        [](iec_session_t *session, uint32_t upgrade_id) {
+            return iec104_cancel_upgrade(session, upgrade_id);
+        });
+}
+
 struct TestCase {
     const char *name;
     void (*run)();
@@ -3043,6 +3485,7 @@ int gw_protocol_run_lifecycle_tests(const char *filter)
         {"m101.parameters", test_m101_parameters},
         {"m101.device_description", test_m101_device_description},
         {"m101.file_transfer", test_m101_file_transfer},
+        {"m101.upgrade", test_m101_upgrade},
         {"iec101.validate_config", test_iec101_validate_config},
         {"iec101.lifecycle", test_iec101_lifecycle},
         {"iec101.raw_asdu", test_iec101_raw_asdu},
@@ -3054,6 +3497,7 @@ int gw_protocol_run_lifecycle_tests(const char *filter)
         {"iec101.parameters", test_iec101_parameters},
         {"iec101.device_description", test_iec101_device_description},
         {"iec101.file_transfer", test_iec101_file_transfer},
+        {"iec101.upgrade", test_iec101_upgrade},
         {"iec104.validate_config", test_iec104_validate_config},
         {"iec104.lifecycle", test_iec104_lifecycle},
         {"iec104.raw_asdu", test_iec104_raw_asdu},
@@ -3065,6 +3509,7 @@ int gw_protocol_run_lifecycle_tests(const char *filter)
         {"iec104.parameters", test_iec104_parameters},
         {"iec104.device_description", test_iec104_device_description},
         {"iec104.file_transfer", test_iec104_file_transfer},
+        {"iec104.upgrade", test_iec104_upgrade},
     };
 
     int failures = 0;

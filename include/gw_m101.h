@@ -489,6 +489,75 @@ typedef struct iec_file_operation_result {
     uint8_t is_final;
 } iec_file_operation_result_t;
 
+typedef int(GW_PROTOCOL_CALL *iec_upgrade_read_chunk_fn)(
+    void *ctx,
+    uint32_t offset,
+    uint8_t *buffer,
+    uint32_t capacity,
+    uint32_t *out_len);
+
+typedef struct iec_upgrade_image_source {
+    void *ctx;
+    uint32_t total_size;
+    iec_upgrade_read_chunk_fn read;
+} iec_upgrade_image_source_t;
+
+typedef enum iec_upgrade_stage {
+    IEC_UPGRADE_STAGE_STARTING = 1,
+    IEC_UPGRADE_STAGE_WAIT_START_CONFIRM = 2,
+    IEC_UPGRADE_STAGE_EXECUTING = 3,
+    IEC_UPGRADE_STAGE_TRANSFERRING = 4,
+    IEC_UPGRADE_STAGE_FINISHING = 5,
+    IEC_UPGRADE_STAGE_CANCELING = 6,
+    IEC_UPGRADE_STAGE_COMPLETED = 7,
+    IEC_UPGRADE_STAGE_FAILED = 8,
+    IEC_UPGRADE_STAGE_CANCELED = 9
+} iec_upgrade_stage_t;
+
+typedef enum iec_upgrade_result_code {
+    IEC_UPGRADE_RESULT_COMPLETED = 1,
+    IEC_UPGRADE_RESULT_REJECTED = 2,
+    IEC_UPGRADE_RESULT_CANCELED = 3,
+    IEC_UPGRADE_RESULT_TIMEOUT = 4,
+    IEC_UPGRADE_RESULT_TRANSFER_FAILED = 5,
+    IEC_UPGRADE_RESULT_NEGATIVE_CONFIRM = 6,
+    IEC_UPGRADE_RESULT_PROTOCOL_ERROR = 7,
+    IEC_UPGRADE_RESULT_UNSUPPORTED = 8,
+    IEC_UPGRADE_RESULT_READ_FAILED = 9
+} iec_upgrade_result_code_t;
+
+typedef struct iec_upgrade_request {
+    uint16_t common_address;
+    const char *remote_directory;
+    const char *remote_file_name;
+    iec_upgrade_image_source_t image;
+    uint32_t preferred_chunk_size;
+    const char *checksum_text;
+    uint8_t overwrite_existing;
+    uint32_t command_timeout_ms;
+    uint32_t transfer_timeout_ms;
+} iec_upgrade_request_t;
+
+typedef struct iec_upgrade_progress {
+    uint32_t upgrade_id;
+    iec_upgrade_stage_t stage;
+    uint32_t transfer_id;
+    uint32_t bytes_transferred;
+    uint32_t total_size;
+    uint8_t percent;
+} iec_upgrade_progress_t;
+
+typedef struct iec_upgrade_result {
+    uint32_t upgrade_id;
+    iec_upgrade_result_code_t result;
+    iec_upgrade_stage_t final_stage;
+    uint32_t bytes_transferred;
+    uint32_t total_size;
+    uint8_t cause_of_transmission;
+    int32_t native_error_code;
+    const char *detail_message;
+} iec_upgrade_result_t;
+
 typedef enum iec_raw_asdu_direction {
     IEC_RAW_ASDU_RX = 1,
     IEC_RAW_ASDU_TX = 2
@@ -613,6 +682,16 @@ typedef void(GW_PROTOCOL_CALL *iec_on_file_operation_result_fn)(
     const iec_file_operation_result_t *result,
     void *user_context);
 
+typedef void(GW_PROTOCOL_CALL *iec_on_upgrade_progress_fn)(
+    iec_session_t *session,
+    const iec_upgrade_progress_t *progress,
+    void *user_context);
+
+typedef void(GW_PROTOCOL_CALL *iec_on_upgrade_result_fn)(
+    iec_session_t *session,
+    const iec_upgrade_result_t *result,
+    void *user_context);
+
 typedef struct iec_callbacks {
     iec_on_session_state_fn on_session_state;
     iec_on_point_indication_fn on_point_indication;
@@ -625,6 +704,8 @@ typedef struct iec_callbacks {
     iec_on_file_data_indication_fn on_file_data_indication;
     iec_on_file_operation_result_fn on_file_operation_result;
     iec_on_device_description_fn on_device_description;
+    iec_on_upgrade_progress_fn on_upgrade_progress;
+    iec_on_upgrade_result_fn on_upgrade_result;
 } iec_callbacks_t;
 
 #ifdef __cplusplus
@@ -740,6 +821,13 @@ GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL m101_get_file_transfer_status(
 GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL m101_cancel_file_transfer(
     iec_session_t *session,
     uint32_t transfer_id);
+GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL m101_upgrade_firmware(
+    iec_session_t *session,
+    const iec_upgrade_request_t *request,
+    uint32_t *out_upgrade_id);
+GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL m101_cancel_upgrade(
+    iec_session_t *session,
+    uint32_t upgrade_id);
 GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL m101_set_option(
     iec_session_t *session,
     iec_option_t option,

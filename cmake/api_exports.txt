@@ -1,7 +1,7 @@
 # Release API export manifest.
 # Format: <target>:<symbol>
 #
-# Current implementation stage: lifecycle, configuration, interrogation, point read, clock, parameter, device description, file transfer, and raw ASDU send APIs.
+# Release export baseline. check_release_api treats this file as the ABI regression guard.
 
 # GW_m101 exports
 GW_m101:m101_create
@@ -25,6 +25,8 @@ GW_m101:m101_read_file
 GW_m101:m101_write_file
 GW_m101:m101_get_file_transfer_status
 GW_m101:m101_cancel_file_transfer
+GW_m101:m101_upgrade_firmware
+GW_m101:m101_cancel_upgrade
 GW_m101:m101_set_option
 GW_m101:m101_send_raw_asdu
 GW_m101:m101_validate_config
@@ -51,6 +53,8 @@ GW_iec101:iec101_read_file
 GW_iec101:iec101_write_file
 GW_iec101:iec101_get_file_transfer_status
 GW_iec101:iec101_cancel_file_transfer
+GW_iec101:iec101_upgrade_firmware
+GW_iec101:iec101_cancel_upgrade
 GW_iec101:iec101_set_option
 GW_iec101:iec101_send_raw_asdu
 GW_iec101:iec101_validate_config
@@ -77,6 +81,8 @@ GW_iec104:iec104_read_file
 GW_iec104:iec104_write_file
 GW_iec104:iec104_get_file_transfer_status
 GW_iec104:iec104_cancel_file_transfer
+GW_iec104:iec104_upgrade_firmware
+GW_iec104:iec104_cancel_upgrade
 GW_iec104:iec104_set_option
 GW_iec104:iec104_send_raw_asdu
 GW_iec104:iec104_validate_config
