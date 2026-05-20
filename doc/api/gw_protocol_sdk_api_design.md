@@ -4,6 +4,7 @@
 
 | 版本号 | 日期 | 修改人 | 变更说明 |
 | --- | --- | --- | --- |
+| V1.1 | 2026-05-20 | 姜俊丞 | 修订 API 语义一致性：补齐关键结构体总表，明确参数读取不承载分组/描述元数据、自描述按片段返回、参数写入不自动回读校验、文件不支持结果码、安全 transport 重连边界及运行期选项命名 |
 | V1.0 | 2026-05-12 | 姜俊丞 | 初始版本 |
 
 ## 1. 文档目的
@@ -88,7 +89,7 @@
 | `<prefix>_read_point` | 按地址读取单个对象 | 点位地址 | 请求是否被接受 | `on_point_indication`、`on_link_event` |
 | `<prefix>_control_point` | 下发遥控、设定值或扩展运维遥控命令 | 命令请求结构体 | 请求是否被接受并生成命令 ID | `on_command_result` |
 | `<prefix>_get_device_description` | 获取终端自描述内容 | 自描述请求结构体 | 请求是否被接受并生成请求 ID | `on_device_description` |
-| `<prefix>_read_parameters` | 读取参数或参数分组 | 参数读取请求结构体 | 请求是否被接受并生成请求 ID | `on_parameter_indication` |
+| `<prefix>_read_parameters` | 按全部、参数域或地址范围读取参数值 | 参数读取请求结构体 | 请求是否被接受并生成请求 ID | `on_parameter_indication` |
 | `<prefix>_write_parameters` | 批量写入参数 | 参数写入请求结构体 | 请求是否被接受并生成请求 ID | `on_parameter_result` |
 | `<prefix>_verify_parameters` | 按期望值回读校验参数 | 参数校验请求结构体 | 请求是否被接受并生成请求 ID | `on_parameter_result`、`on_parameter_indication` |
 | `<prefix>_switch_setting_group` | 查询或切换定值区 | 定值区请求结构体 | 请求是否被接受并生成请求 ID | `on_parameter_result` |
@@ -111,14 +112,14 @@
 | `on_link_event` | 建链、断链、重连、链路异常时 | 感知链路健康状态 | 由库内工作线程触发 |
 | `on_point_indication` | 收到高层点表对象时 | 接收单点、双点、遥测、累计量等对象 | 由库内工作线程触发 |
 | `on_command_result` | 命令收到确认、否认或超时时 | 获取命令最终结果 | 由库内工作线程触发 |
-| `on_device_description` | 收到终端自描述内容时 | 接收 XML 或 msg 自描述文件并供上层解析 | 由库内工作线程触发 |
+| `on_device_description` | 收到终端自描述内容片段时 | 接收 XML 或 msg 自描述内容片段，供上层按请求聚合后解析 | 由库内工作线程触发 |
 | `on_file_list_indication` | 收到文件目录分帧结果时 | 接收目录项并构建远端文件视图 | 由库内工作线程触发 |
 | `on_file_data_indication` | 收到文件读取数据块时 | 接收文件块、推进偏移并支撑断点续传 | 由库内工作线程触发 |
 | `on_file_operation_result` | 文件目录、文件读写或取消完成时 | 获取文件类请求的最终结果 | 由库内工作线程触发 |
 | `on_upgrade_progress` | 程序升级阶段或进度变化时 | 获取升级启动、执行、传输、结束等阶段进度 | 由库内工作线程触发 |
 | `on_upgrade_result` | 程序升级完成、失败或取消时 | 获取升级最终结果和诊断信息 | 由库内工作线程触发 |
 | `on_clock_result` | 校时或时钟读取完成时 | 获取校时确认、终端当前时间或失败诊断 | 由库内工作线程触发 |
-| `on_parameter_indication` | 收到参数读取结果时 | 接收参数值和可选参数描述信息 | 由库内工作线程触发 |
+| `on_parameter_indication` | 收到参数读取结果时 | 接收参数值分帧结果，不承载描述或分组元数据 | 由库内工作线程触发 |
 | `on_parameter_result` | 参数写入、校验、切区完成时 | 获取参数类请求的最终结果 | 由库内工作线程触发 |
 | `on_raw_asdu` | 启用旁路且收发原始 ASDU 时 | 调试抓包、特殊报文透传 | 由库内工作线程触发 |
 | `on_log` | 产生日志时 | 联调、排障和接入监控 | 由库内工作线程触发 |
@@ -133,11 +134,16 @@
 | `iec_point_address_t` | 协议原生地址 | 公共地址、信息体地址、类型标识、传送原因 |
 | `iec_point_value_t` | 高层点值 | 点值类型、质量位、时间戳、实际数据 |
 | `iec_command_request_t` | 控制命令 | 目标地址、命令类型、命令语义、命令模式、命令值 |
+| `iec_interrogation_request_t` | 总召请求 | 公共地址、总召限定词 |
+| `iec_counter_interrogation_request_t` | 电度量召唤请求 | 公共地址、召唤限定词、冻结语义 |
 | `iec_parameter_item_t` | 单个参数值对象 | 参数 ID、地址、参数域、值类型、当前值 |
-| `iec_parameter_descriptor_t` | 参数元数据 | 名称、分组、范围、缺省值、模板/校验能力 |
-| `iec_parameter_read_request_t` | 参数读取请求 | 读取模式、参数域、地址范围、定值区 |
-| `iec_parameter_write_request_t` | 参数写入请求 | 参数数组、目标定值区、写后校验开关 |
-| `iec_device_description_t` | 自描述内容事件 | 格式、内容视图、分片完成标记 |
+| `iec_parameter_descriptor_t` | 上层参数元数据缓存 | 名称、分组、范围、缺省值、模板/校验能力，来自自描述解析 |
+| `iec_parameter_read_request_t` | 参数读取请求 | 读取模式、参数域、地址范围、定值区；分组由上层转换为地址条件 |
+| `iec_parameter_write_request_t` | 参数写入请求 | 参数数组、目标定值区、保留校验开关 |
+| `iec_parameter_verify_request_t` | 参数回读校验请求 | 期望参数数组、目标定值区 |
+| `iec_setting_group_request_t` | 定值区请求 | 查询当前区、切换目标区 |
+| `iec_device_description_request_t` | 自描述获取请求 | 公共地址、格式偏好、最大内容长度 |
+| `iec_device_description_t` | 自描述内容片段事件 | 格式、当前片段视图、分片完成标记 |
 | `iec_file_list_request_t` | 文件目录请求 | 目录名、是否附带详情 |
 | `iec_file_entry_t` | 单个目录项 | 文件名、文件大小、时间戳、校验摘要 |
 | `iec_file_list_indication_t` | 文件目录结果 | 目录项数组、数量、结束标记 |
@@ -149,8 +155,10 @@
 | `iec_upgrade_request_t` | 程序升级请求 | 远端文件位置、升级包大小、分块读取回调、分块大小、诊断校验文本 |
 | `iec_upgrade_progress_t` | 程序升级进度 | 升级阶段、已传输字节数、总大小、关联文件传输 ID |
 | `iec_upgrade_result_t` | 程序升级结果 | 结果码、最终阶段、已传输字节数、协议诊断细节 |
+| `iec_clock_sync_request_t` | 校时请求 | 公共地址、系统时间标志、指定时标 |
 | `iec_clock_read_request_t` | 时钟读取请求 | 公共地址 |
 | `iec_clock_result_t` | 时钟命令结果 | 操作类型、结果码、终端时标、协议诊断细节 |
+| `iec_raw_asdu_tx_t` | 原始 ASDU 发送请求 | 载荷视图、长度、旁路高层校验标志 |
 | `iec_raw_asdu_event_t` | 原始报文事件 | 收发方向、类型标识、公共地址、载荷视图 |
 | `m101_master_config_t` | 运维101 扩展配置 | 链路地址、字段长度、重发参数、运维文件能力约束 |
 | `iec101_master_config_t` | 标准101 扩展配置 | 链路地址、字段长度、重发参数 |
@@ -302,6 +310,10 @@ typedef struct iec_session iec_session_t;
 | 异步回调 | `on_point_indication`、`on_link_event`。 |
 | 备注 | 同步返回成功仅表示请求已进入发送流程，读取结果通过异步回调体现。 |
 
+本接口对应 IEC 60870-5-101/104 的读命令 `C_RD_NA_1`，类型标识为 `102`，传送原因为请求。该能力属于协议定义能力，但是否被具体终端支持取决于终端厂家实现和点表配置。若终端不支持单点读取，可能无响应、返回否定确认或返回未知信息体地址等异常结果。工程主流程建议优先使用总召、电度量召唤、周期上送和变化上送获取点值；本接口主要用于少量点位人工刷新、诊断或补读。
+
+本接口仅用于读取运行点值对象，不用于读取参数、定值区、文件或点表配置；这些语义应使用对应的参数、文件或配置接口。
+
 #### <prefix>_control_point
 
 | 字段 | 内容 |
@@ -377,7 +389,7 @@ typedef struct iec_session iec_session_t;
 | 出参 | `uint32_t *out_request_id`: 请求 ID 输出地址。成功时由库生成，用于关联异步结果。 |
 | 返回值 | `IEC_STATUS_OK`: 请求已进入发送流程；失败返回其他错误码，详见返回码定义。 |
 | 异步回调 | `on_device_description`。 |
-| 备注 | 自描述内容通过 `on_device_description` 回调异步返回。XML 或 msg 内容解析、缓存和界面生成由上层应用负责。 |
+| 备注 | 自描述内容通过 `on_device_description` 回调按片段异步返回；上层按 `request_id` 聚合完整 XML 或 msg 后再解析、缓存和生成界面。 |
 
 #### <prefix>_read_parameters
 
@@ -386,7 +398,7 @@ typedef struct iec_session iec_session_t;
 | 函数名称 | `iec_status_t <prefix>_read_parameters(iec_session_t *session, const iec_parameter_read_request_t *request, uint32_t *out_request_id)` |
 | 函数功能 | 读取参数。 |
 | 入参 | `iec_session_t *session`: 目标会话句柄。 |
-|  | `const iec_parameter_read_request_t *request`: 参数读取请求，支持读取全部参数、按参数域读取、按分组读取或按地址范围读取。 |
+|  | `const iec_parameter_read_request_t *request`: 参数读取请求，支持读取全部参数、按参数域读取或按地址范围读取；按 UI 分组读取时，上层应先依据自描述缓存转换为地址条件。 |
 | 出参 | `uint32_t *out_request_id`: 请求 ID 输出地址。成功时由库生成，用于关联异步结果。 |
 | 返回值 | `IEC_STATUS_OK`: 请求已进入发送流程；失败返回其他错误码，详见返回码定义。 |
 | 异步回调 | `on_parameter_indication`。 |
@@ -399,11 +411,11 @@ typedef struct iec_session iec_session_t;
 | 函数名称 | `iec_status_t <prefix>_write_parameters(iec_session_t *session, const iec_parameter_write_request_t *request, uint32_t *out_request_id)` |
 | 函数功能 | 批量写入参数。 |
 | 入参 | `iec_session_t *session`: 目标会话句柄。 |
-|  | `const iec_parameter_write_request_t *request`: 参数写入请求，提供目标定值区、参数数组和写后校验控制位。 |
+|  | `const iec_parameter_write_request_t *request`: 参数写入请求，提供目标定值区和参数数组。 |
 | 出参 | `uint32_t *out_request_id`: 请求 ID 输出地址。成功时由库生成，用于关联异步结果。 |
 | 返回值 | `IEC_STATUS_OK`: 请求已进入发送流程；失败返回其他错误码，详见返回码定义。 |
-| 异步回调 | `on_parameter_result`；若启用写后校验，还可能触发 `on_parameter_indication`。 |
-| 备注 | 写入最终结果以 `on_parameter_result` 回调为准。`verify_after_write` 不代表同步返回时已经完成校验。 |
+| 异步回调 | `on_parameter_result`。 |
+| 备注 | 写入最终结果以 `on_parameter_result` 回调为准。本接口不自动发起回读校验；如需校验，上层应在写入成功后显式调用 `<prefix>_verify_parameters`。 |
 
 #### <prefix>_verify_parameters
 
@@ -434,9 +446,12 @@ typedef struct iec_session iec_session_t;
 行为约束如下：
 
 - 参数读取、写入、校验和定值区管理均通过专用参数接口承载，不复用 `<prefix>_read_point` 或 `<prefix>_control_point`。
-- 参数模板导入导出由上层应用负责，动态库只负责参数对象和协议交互，不承担模板文件持久化职责。
-- `<prefix>_write_parameters` 的 `verify_after_write` 只表示库在写入成功后继续发起回读校验，不代表同步返回时已经完成校验。
-- `<prefix>_verify_parameters` 用于模板下发后的显式回读校验，也可用于上层对关键参数做抽查。
+- 参数描述、分组、单位、范围和模板能力来自终端 XML/msg 自描述解析缓存，由上层应用或 UI 层负责；动态库参数读取回调只返回参数值，不从终端定值召唤中返回描述信息。
+- 按分组读取不是终端参数读取通道的原生语义；上层按分组操作时，应先用本地自描述缓存把分组转换为参数域、地址范围或多次读取请求。
+- 若同一分组内参数地址不连续，当前接口可拆分为多个地址范围读取；后续 ABI 修订建议补充“按地址列表读取”能力，避免用分组名要求终端返回参数地址集合。
+- 参数模板导入导出由上层应用负责，动态库只负责参数值对象和协议交互，不承担模板文件持久化职责。
+- `<prefix>_write_parameters` 只负责批量写入参数，不隐式发起回读校验，也不触发 `on_parameter_indication`。
+- `<prefix>_verify_parameters` 用于写入成功后的显式回读校验，也可用于上层对关键参数做抽查。
 - `<prefix>_switch_setting_group` 只建模当前区查询和切换动作，不在接口层扩展定值区批量管理策略。
 - `<prefix>_get_device_description` 负责从终端取回 XML 或 msg 自描述内容，解析、缓存和界面生成由上层应用负责。
 
@@ -631,6 +646,7 @@ typedef struct iec_transport {
 - `recv` 应向协议库返回一帧完整的明文协议帧；粘包、半包、EB 报文重组和安全解封装由 transport 实现处理。
 - `send` 和 `recv` 的返回值由 transport 实现定义；建议返回 `0` 表示成功，非 `0` 表示传输层错误，并通过日志或扩展诊断保留原始错误码。
 - `max_plain_frame_len` 必须小于等于 transport 在当前模式下可承载的明文协议帧上限；安全模式下应扣除 EB 头尾、MAC 和加密开销。
+- 协议库的重连策略只负责协议会话层重试和链路事件上报，不负责重新打开真实通信资源或执行安全认证。安全 transport 在断链后必须使安全会话失效，并在重新认证、密钥协商完成前拒绝或阻塞业务明文 `send`/`recv`，避免协议库在安全状态未恢复时继续业务交互。
 
 以下参数在 `<prefix>_create` 阶段确定：
 
@@ -650,7 +666,7 @@ typedef struct iec_transport {
 | `iec_point_address_t` | 结构体 | 表达协议原生点位地址 | 公共地址、信息体地址、类型标识、传送原因、发起者地址 |
 | `iec_point_type_t` | 枚举 | 表达高层点值类型 | 单点、双点、步位值、归一化遥测、标度化遥测、短浮点遥测、累计量、32 位比特串 |
 | `iec_timestamp_t` | 结构体 | 表达规约时标 | 毫秒、分、时、日、月、年、有效性标志 |
-| `iec_point_data_t` | 联合体 | 承载点值实际数据 | `single`、`doubled`、`scaled`、`short_float`、`integrated_total`、`bitstring32`、`step` |
+| `iec_point_data_t` | 联合体 | 承载点值实际数据 | `single`、`doubled`、`step`、`normalized`、`scaled`、`short_float`、`integrated_total`、`bitstring32` |
 | `iec_point_value_t` | 结构体 | 表达上送点值对象 | 点值类型、质量位、时标标志、序列标志、数据、时标 |
 
 对应 C 定义如下：
@@ -688,11 +704,12 @@ typedef struct iec_timestamp {
 typedef union iec_point_data {
     uint8_t single;           /* 单点值 */
     uint8_t doubled;          /* 双点值 */
+    int8_t step;              /* 步位值 */
+    int16_t normalized;       /* 归一化数值 */
     int16_t scaled;           /* 标度化数值 */
     float short_float;        /* 短浮点数值 */
     int32_t integrated_total; /* 累计量 */
     uint32_t bitstring32;     /* 32 位比特串 */
-    int8_t step;              /* 步位值 */
 } iec_point_data_t;
 
 typedef struct iec_point_value {
@@ -891,7 +908,7 @@ typedef struct iec_raw_asdu_tx {
 | --- | --- | --- | --- |
 | `iec_device_description_format_t` | 枚举 | 表达终端自描述内容格式 | 自动、XML、msg |
 | `iec_device_description_request_t` | 结构体 | 表达自描述获取请求 | 公共地址、格式偏好、最大内容长度 |
-| `iec_device_description_t` | 结构体 | 表达自描述返回内容 | 请求 ID、公共地址、实际格式、内容视图、分片长度、完成标志 |
+| `iec_device_description_t` | 结构体 | 表达自描述返回片段 | 请求 ID、公共地址、实际格式、当前片段视图、当前片段长度、完成标志 |
 
 文件类型说明如下：
 
@@ -900,7 +917,7 @@ typedef struct iec_raw_asdu_tx {
 | `iec_file_operation_t` | 枚举 | 表达文件操作类型 | 目录召唤、读取、写入、取消 |
 | `iec_file_transfer_direction_t` | 枚举 | 表达文件传输方向 | 远端到本地、本地到远端 |
 | `iec_file_transfer_state_t` | 枚举 | 表达文件传输本地状态 | 已受理、传输中、已完成、已取消、失败 |
-| `iec_file_result_code_t` | 枚举 | 表达文件操作结果 | 已受理、完成、取消、拒绝、否定确认、偏移不匹配、超时、协议错误、不存在 |
+| `iec_file_result_code_t` | 枚举 | 表达文件操作结果 | 已受理、完成、取消、拒绝、否定确认、偏移不匹配、超时、协议错误、不存在、不支持 |
 | `iec_file_list_request_t` | 结构体 | 表达目录召唤请求 | 公共地址、目录名、是否附带详情 |
 | `iec_file_entry_t` | 结构体 | 表达目录项 | 目录名、文件名、大小、修改时间、目录标志、只读标志、校验摘要 |
 | `iec_file_list_indication_t` | 结构体 | 表达目录召唤返回分片 | 请求 ID、公共地址、目录名、目录项数组、数量、完成标志 |
@@ -931,16 +948,16 @@ typedef struct iec_raw_asdu_tx {
 | `iec_parameter_value_type_t` | 枚举 | 表达参数值类型 | 布尔、有符号整型、无符号整型、浮点、枚举、字符串 |
 | `iec_parameter_scalar_t` | 联合体 | 承载参数标量值 | `bool_value`、`int_value`、`uint_value`、`float_value`、`enum_value`、`string_value` |
 | `iec_parameter_item_t` | 结构体 | 表达当前参数值或待写入参数 | 参数 ID、地址、参数域、值类型、值 |
-| `iec_parameter_descriptor_t` | 结构体 | 表达参数描述信息 | 参数 ID、地址、参数域、值类型、读写属性、名称、分组、单位、范围、模板与校验能力 |
-| `iec_parameter_read_mode_t` | 枚举 | 表达参数读取模式 | 全部、按域、按分组、按地址范围 |
-| `iec_parameter_read_request_t` | 结构体 | 表达参数读取请求 | 公共地址、读取模式、参数域、分组、地址范围、定值区、是否返回描述 |
-| `iec_parameter_write_request_t` | 结构体 | 表达参数写入请求 | 公共地址、定值区、参数数组、数量、写后校验标志 |
+| `iec_parameter_descriptor_t` | 结构体 | 表达上层缓存的参数描述信息 | 参数 ID、地址、参数域、值类型、读写属性、名称、分组、单位、范围、模板与校验能力，来源于自描述解析 |
+| `iec_parameter_read_mode_t` | 枚举 | 表达参数读取模式 | 全部、按域、按地址范围；按分组需由上层先转换 |
+| `iec_parameter_read_request_t` | 结构体 | 表达参数读取请求 | 公共地址、读取模式、参数域、地址范围、定值区 |
+| `iec_parameter_write_request_t` | 结构体 | 表达参数写入请求 | 公共地址、定值区、参数数组、数量、保留校验标志 |
 | `iec_parameter_verify_request_t` | 结构体 | 表达参数回读校验请求 | 公共地址、定值区、期望参数数组、数量 |
 | `iec_setting_group_action_t` | 枚举 | 表达定值区动作 | 查询当前区、切换到目标区 |
 | `iec_setting_group_request_t` | 结构体 | 表达定值区请求 | 公共地址、动作、目标定值区 |
 | `iec_parameter_operation_t` | 枚举 | 表达参数操作类型 | 读取、写入、校验、定值区操作 |
 | `iec_parameter_result_code_t` | 枚举 | 表达参数操作结果 | 接受、拒绝、校验一致、校验不一致、只读、越限、切区成功、超时、协议错误、当前区返回 |
-| `iec_parameter_indication_t` | 结构体 | 表达参数读取返回 | 请求 ID、操作、定值区、完成标志、描述标志、参数值、参数描述 |
+| `iec_parameter_indication_t` | 结构体 | 表达参数读取返回 | 请求 ID、操作、定值区、完成标志、参数值 |
 | `iec_parameter_result_t` | 结构体 | 表达参数操作结果 | 请求 ID、操作、结果码、参数 ID、地址、定值区、最终标志 |
 
 对应 C 定义如下：
@@ -962,9 +979,9 @@ typedef struct iec_device_description {
     uint32_t request_id;                        /* 与请求 ID 对应 */
     uint16_t common_address;                    /* 目标公共地址 */
     iec_device_description_format_t format;     /* 实际返回格式 */
-    const uint8_t *content;                     /* 自描述内容视图 */
+    const uint8_t *content;                     /* 当前自描述内容片段视图 */
     uint32_t content_size;                      /* 当前分片长度 */
-    uint8_t is_complete;                        /* 是否已接收完整内容 */
+    uint8_t is_complete;                        /* 是否为本次请求的最后分片 */
 } iec_device_description_t;
 
 typedef enum iec_file_operation {
@@ -996,7 +1013,8 @@ typedef enum iec_file_result_code {
     IEC_FILE_RESULT_OFFSET_MISMATCH = 6,   /* 偏移不匹配 */
     IEC_FILE_RESULT_TIMEOUT = 7,           /* 文件请求超时 */
     IEC_FILE_RESULT_PROTOCOL_ERROR = 8,    /* 协议处理错误 */
-    IEC_FILE_RESULT_NOT_FOUND = 9          /* 目标文件不存在 */
+    IEC_FILE_RESULT_NOT_FOUND = 9,         /* 目标文件不存在 */
+    IEC_FILE_RESULT_UNSUPPORTED = 10       /* 目标协议或终端不支持 */
 } iec_file_result_code_t;
 
 typedef struct iec_file_list_request {
@@ -1223,19 +1241,16 @@ typedef struct iec_parameter_descriptor {
 typedef enum iec_parameter_read_mode {
     IEC_PARAMETER_READ_ALL = 1,             /* 读取全部参数 */
     IEC_PARAMETER_READ_BY_SCOPE = 2,        /* 按参数域读取 */
-    IEC_PARAMETER_READ_BY_GROUP = 3,        /* 按分组读取 */
-    IEC_PARAMETER_READ_BY_ADDRESS_RANGE = 4 /* 按地址范围读取 */
+    IEC_PARAMETER_READ_BY_ADDRESS_RANGE = 3 /* 按地址范围读取 */
 } iec_parameter_read_mode_t;
 
 typedef struct iec_parameter_read_request {
     uint16_t common_address;                 /* 目标公共地址 */
     iec_parameter_read_mode_t read_mode;     /* 读取模式 */
     iec_parameter_scope_t scope;             /* 目标参数域 */
-    const char *group_name;                  /* 分组名 */
     uint32_t start_address;                  /* 起始地址 */
     uint32_t end_address;                    /* 结束地址 */
     uint8_t setting_group;                   /* 目标定值区, 0 表示当前区 */
-    uint8_t include_descriptor;              /* 是否同时返回参数描述信息 */
 } iec_parameter_read_request_t;
 
 typedef struct iec_parameter_write_request {
@@ -1243,7 +1258,7 @@ typedef struct iec_parameter_write_request {
     uint8_t setting_group;                   /* 目标定值区, 0 表示当前区 */
     const iec_parameter_item_t *items;       /* 待写入参数数组 */
     uint32_t item_count;                     /* 参数数量 */
-    uint8_t verify_after_write;              /* 写入后是否自动回读校验 */
+    uint8_t verify_after_write;              /* 保留字段, 当前必须为 0; 回读校验请显式调用 verify_parameters */
 } iec_parameter_write_request_t;
 
 typedef struct iec_parameter_verify_request {
@@ -1289,9 +1304,7 @@ typedef struct iec_parameter_indication {
     iec_parameter_operation_t operation;       /* 对应操作 */
     uint8_t setting_group;                     /* 当前定值区 */
     uint8_t is_final;                          /* 是否为该次读取最后一条 */
-    uint8_t has_descriptor;                    /* 是否附带参数描述信息 */
     iec_parameter_item_t item;                 /* 参数值对象 */
-    iec_parameter_descriptor_t descriptor;     /* 参数描述对象 */
 } iec_parameter_indication_t;
 
 typedef struct iec_parameter_result {
@@ -1309,9 +1322,9 @@ typedef struct iec_parameter_result {
 
 - `iec_parameter_scope_t` 用于统一表达固有参数、运行参数、动作参数、点表配置和各类模块参数，不在接口层为无线、电源、线损单独派生函数族。
 - 点表在线读取、修改和模板下发校验通过参数接口承载，使用 `IEC_PARAMETER_SCOPE_POINT_TABLE` 表达点表配置域；实时遥信、遥测、电量等运行点值仍通过点表接口和 `on_point_indication` 承载。
-- `iec_parameter_descriptor_t` 用于承载参数名称、范围、缺省值和模板/校验能力，便于上层构建模板和参数编辑界面。
-- `iec_parameter_item_t` 只表达当前参数值；若上层需要保留参数名称、单位等元数据，应结合 `descriptor` 一并缓存。
-- `include_descriptor` 适合首次建模或模板加载场景；频繁轮询场景下可关闭以减少冗余数据。
+- `iec_parameter_descriptor_t` 用于承载上层从 XML/msg 自描述解析得到的参数名称、分组、范围、缺省值和模板/校验能力，便于构建模板和参数编辑界面；它不是终端定值召唤回调返回的描述对象。
+- `iec_parameter_item_t` 只表达当前参数值；若上层需要展示参数名称、单位、分组等元数据，应使用 UI 层自描述缓存按参数 ID 或地址补齐。
+- 参数读取请求不接收分组名，也不携带“返回描述信息”开关；参数读取回调不携带描述对象。若按分组操作，上层应先根据自描述缓存转换为参数域、地址范围或多次读取请求；后续接口修订可补充地址列表读取能力。
 - `setting_group` 统一使用 `0` 表示当前定值区，上层无需预先知道实际区号即可发起读取或写入。
 - `iec_file_list_request_t` 和 `iec_file_list_indication_t` 只表达目录召唤语义，不承担文件内容传输职责。
 - `start_offset = 0` 表示首次完整传输；调用方可使用 `iec_file_data_indication_t.next_offset` 或 `iec_file_transfer_status_t.acknowledged_offset` 作为断点续传恢复点。
@@ -1343,14 +1356,14 @@ typedef struct iec_parameter_result {
 | `on_link_event` | `iec_on_link_event_fn` | 建链、断链、重连或链路异常 | `iec_link_event_t`、`iec_status_t` | 值传递 |
 | `on_point_indication` | `iec_on_point_indication_fn` | 收到遥信、遥测、累计量等点表数据 | `iec_point_address_t`、`iec_point_value_t` | 当前回调期间有效 |
 | `on_command_result` | `iec_on_command_result_fn` | 遥控或遥调命令出现确认、否认、超时或最终结果 | `iec_command_result_t` | 当前回调期间有效 |
-| `on_device_description` | `iec_on_device_description_fn` | 收到终端自描述内容或分片 | `iec_device_description_t` | 当前回调期间有效 |
+| `on_device_description` | `iec_on_device_description_fn` | 收到终端自描述内容片段 | `iec_device_description_t` | 当前回调期间有效 |
 | `on_file_list_indication` | `iec_on_file_list_indication_fn` | 收到文件目录项分片 | `iec_file_list_indication_t` | 当前回调期间有效 |
-| `on_file_data_indication` | `iec_on_file_data_indication_fn` | 收到文件读取数据块或写入进度数据 | `iec_file_data_indication_t` | 当前回调期间有效 |
+| `on_file_data_indication` | `iec_on_file_data_indication_fn` | 收到文件读取数据块 | `iec_file_data_indication_t` | 当前回调期间有效 |
 | `on_file_operation_result` | `iec_on_file_operation_result_fn` | 文件目录、读取、写入或取消操作产生结果 | `iec_file_operation_result_t` | 当前回调期间有效 |
 | `on_upgrade_progress` | `iec_on_upgrade_progress_fn` | 程序升级阶段或进度变化 | `iec_upgrade_progress_t` | 当前回调期间有效 |
 | `on_upgrade_result` | `iec_on_upgrade_result_fn` | 程序升级完成、失败或取消 | `iec_upgrade_result_t` | 当前回调期间有效 |
 | `on_clock_result` | `iec_on_clock_result_fn` | 校时或时钟读取完成 | `iec_clock_result_t` | 当前回调期间有效 |
-| `on_parameter_indication` | `iec_on_parameter_indication_fn` | 收到参数读取结果或参数描述 | `iec_parameter_indication_t` | 当前回调期间有效 |
+| `on_parameter_indication` | `iec_on_parameter_indication_fn` | 收到参数读取结果 | `iec_parameter_indication_t` | 当前回调期间有效 |
 | `on_parameter_result` | `iec_on_parameter_result_fn` | 参数写入、校验或定值区切换产生结果 | `iec_parameter_result_t` | 当前回调期间有效 |
 | `on_raw_asdu` | `iec_on_raw_asdu_fn` | 启用旁路后观察到原始 ASDU 收发 | `iec_raw_asdu_event_t` | 当前回调期间有效 |
 | `on_log` | `iec_on_log_fn` | 动态库产生日志 | 日志等级、日志文本 | 当前回调期间有效 |
@@ -1448,10 +1461,10 @@ typedef void (*iec_on_command_result_fn)(
  * @brief 终端自描述回调。
  *
  * @param[in] session      触发回调的会话句柄。
- * @param[in] description  自描述内容视图。
+ * @param[in] description  自描述内容片段视图。
  * @param[in] user_context 用户上下文，原样来自 `iec_session_config_t.user_context`。
  *
- * @note `description->content` 仅在当前回调期间有效，若需长期保留应立即拷贝。
+ * @note `description->content` 仅表示当前片段，且只在当前回调期间有效；上层应按 `request_id` 拷贝并聚合，直到 `is_complete != 0` 后再解析。
  */
 typedef void (*iec_on_device_description_fn)(
     iec_session_t *session,
@@ -1538,10 +1551,10 @@ typedef void (*iec_on_clock_result_fn)(
  * @brief 参数读取结果回调。
  *
  * @param[in] session      触发回调的会话句柄。
- * @param[in] indication   参数值与参数描述视图。
+ * @param[in] indication   参数值视图。
  * @param[in] user_context 用户上下文，原样来自 `iec_session_config_t.user_context`。
  *
- * @note 若需要跨线程保留字符串类型参数值或参数描述，应在回调内立即拷贝。
+ * @note 若需要跨线程保留字符串类型参数值，应在回调内立即拷贝；参数名称、单位、分组等描述信息应来自上层自描述缓存。
  */
 typedef void (*iec_on_parameter_indication_fn)(
     iec_session_t *session,
@@ -1616,7 +1629,7 @@ typedef struct iec_callbacks {
 - 不同会话之间回调允许并发发生。
 - 回调函数必须尽快返回，禁止执行长时间阻塞操作。
 - 回调中采用业务队列、轻量级拷贝和异步处理模式最稳妥。
-- 若需要跨线程保留回调中的地址、点值、参数描述、自描述内容、文件目录项、文件数据块、升级结果、时钟结果、日志内容或原始 ASDU 数据，调用方应自行拷贝。
+- 若需要跨线程保留回调中的地址、点值、参数值、自描述内容、文件目录项、文件数据块、升级结果、时钟结果、日志内容或原始 ASDU 数据，调用方应自行拷贝。
 
 回调重入规则如下：
 
@@ -1645,7 +1658,8 @@ typedef struct iec_session_config {
 
 - `user_context` 透传给所有回调。
 - `startup_timeout_ms` 和 `stop_timeout_ms` 定义同步等待窗口。
-- `reconnect_interval_ms`、`command_timeout_ms`、`enable_raw_asdu` 允许运行时通过 `iec_set_option` 修改。
+- `reconnect_interval_ms`、`command_timeout_ms`、`enable_raw_asdu` 允许运行时通过 `<prefix>_set_option` 修改。
+- `reconnect_interval_ms` 仅约束协议库在 transport 可用时的协议层重试节奏；真实串口/socket 重建、安全认证和密钥协商仍由 transport 或上层适配层负责。
 - `command_timeout_ms` 同时作为命令类请求、参数类请求和文件类请求的缺省等待窗口。
 - `initial_log_level` 作为 `IEC_OPTION_LOG_LEVEL` 的初始值。
 
@@ -1752,6 +1766,8 @@ iec_status_t iec104_validate_config(const iec104_master_config_t *config);
 - 参数读取与参数写入统一映射到库内部参数通道，对上层保持协议无关；对接 101/104 时，库内部按 `TI=202`、`TI=203` 及对应传送原因完成封装和解析。
 - 当 `<prefix>_read_parameters` 选择“读取全部参数”时，库内部应优先采用 `VSQ=0x00` 的整表读取语义，并在最终分帧到达后发出 `is_final = 1` 的参数回调。
 - 对于远程参数上送的结束判定，库内部应识别参数特征标识 `PI` 的后续状态位结束语义；上层只感知结构化参数事件，不直接感知原始字段。
+- 参数读取通道只承载参数值读取、写入和校验，不承载参数名称、分组、单位、范围等描述元数据；这些元数据由上层解析 XML/msg 自描述后缓存。
+- 终端侧定值召唤无法按 UI 分组名返回参数地址集合；上层按分组读取时，应先把分组展开为地址范围或多次读取请求。若地址不连续，建议后续接口修订增加地址列表读取。
 - `<prefix>_switch_setting_group` 在接口层只表达“查询当前区”和“切换目标区”两类动作，具体采用的 101/104 过程或厂商扩展过程由库内部封装。
 - 运维101库可启用运维101专用文件目录、文件读写和升级类运维能力；标准101或104若目标终端不支持该能力，应返回明确的 `IEC_STATUS_UNSUPPORTED` 或异步结果码。
 - 运维101文件传输采用从 `255` 字节扩展到 `1024` 字节的单块数据窗口语义；若上层请求更大块大小，库应自动拆分为多个 `1024` 字节以内且不超过 `iec_transport_t.max_plain_frame_len` 的发送或接收窗口。
@@ -1762,9 +1778,9 @@ iec_status_t iec104_validate_config(const iec104_master_config_t *config);
 - 程序升级通过 `<prefix>_upgrade_firmware` 启动高层状态机；库内部按技术方案要求依次封装启动升级命令、升级执行命令、文件写入过程和升级结束命令。
 - 升级文件写入阶段复用文件传输与断点续传能力，但对上层统一呈现为 `on_upgrade_progress` 和 `on_upgrade_result`，避免上层同时协调命令结果和文件结果。
 - `<prefix>_cancel_upgrade` 对应升级撤销语义；若目标协议或终端不支持撤销，库应返回 `IEC_STATUS_UNSUPPORTED` 或通过 `on_upgrade_result` 返回不支持结果。
-- `<prefix>_get_device_description` 支持 XML 或 msg 自描述内容。库内部可通过专用文件传输通道或扩展 ASDU 通道获取，上层只接收最终的结构化内容视图。
+- `<prefix>_get_device_description` 支持 XML 或 msg 自描述内容。库内部可通过专用文件传输通道或扩展 ASDU 通道获取，并通过 `on_device_description` 向上层返回一次或多次内容片段；上层按 `request_id` 聚合完整原始内容视图。
 - 即使 `<prefix>_get_device_description` 底层复用了文件传输通道，上层仍应优先使用专用自描述 API，而不是用通用文件 API 自行拼装终端模型文件读取过程。
-- 自描述文件建议控制在 64KB 以内。若终端返回分片内容，库内部负责重组，并通过 `iec_device_description_t.is_complete` 标记是否接收完成。
+- 自描述文件建议控制在 64KB 以内。库负责处理底层协议分帧和顺序交付，不承诺聚合为单次大块回调；`iec_device_description_t.is_complete` 标记当前片段是否为该请求最后一片。
 
 ## 7. 最小调用流程
 
@@ -1986,9 +2002,13 @@ sequenceDiagram
 - 安全 transport 的 `recv` 内部负责接收完整 EB 报文、调用 `sec_decrypt_data` 并返回明文协议帧。
 - 安全 transport 应将安全库原始错误码保留在诊断信息中，不应简单映射为协议错误。
 - 链路断开后，安全状态应失效；恢复业务前应重新建链、认证和密钥协商。
+- 协议库可按 `reconnect_interval_ms` 触发协议层重试并上报 `on_link_event(RECONNECTING)`，但不会直接调用安全库重认证。安全 transport 在重认证完成前必须阻止业务明文帧通过；若重认证失败，应通过 `send`/`recv` 返回传输错误，由协议库继续按链路异常处理。
+- 安全 transport 重新完成认证和密钥协商后，才能向协议库恢复明文帧收发；此时协议库可继续建链、总召或其他业务流程，并通过普通链路事件通知上层。
 - 证书导入、证书导出、终端初始证书回写、密钥恢复、USB Key 登录、软件授权、可信验签和安全审计属于安全适配层或上层工具职责；协议库不得直接导出 `sec_*`、`SG_*` 等安全库函数包装接口。
 
 ### 7.3 点表上报流程
+
+点表上报流程覆盖总召响应、单点读取响应、周期上送以及变化遥测、变位遥信等终端主动上送报文。只要会话已启动、`on_point_indication` 已注册，并且收到的 ASDU 能被解码为高层点值对象，库就通过 `on_point_indication` 通知上层；该回调不依赖上层先发起总召。
 
 ```mermaid
 sequenceDiagram
@@ -2025,9 +2045,10 @@ static void on_point_indication(
 推荐处理步骤如下：
 
 1. 在回调中快速判定 `point_type`。
-2. 将 `address` 与 `value` 拷贝到业务队列。
-3. 业务线程做点位映射、告警和落库。
-4. 回调线程尽快返回，避免阻塞后续收发。
+2. 通过 `address->cause_of_transmission` 区分总召响应、读响应、周期上送或主动变化上送；变化遥测、变位遥信等主动上送通常由协议传送原因体现。
+3. 将 `address` 与 `value` 拷贝到业务队列。
+4. 业务线程做点位映射、告警和落库。
+5. 回调线程尽快返回，避免阻塞后续收发。
 
 ### 7.4 原始 ASDU 旁路流程
 
@@ -2085,22 +2106,21 @@ sequenceDiagram
     库->>终端: 发起参数读取
     终端-->>库: 返回参数分帧
     库->>回调: on_parameter_indication(indication)
-    回调->>业务: 拷贝参数值/描述
+    回调->>业务: 拷贝参数值
     终端-->>库: 最后一帧参数
     库->>回调: on_parameter_indication(is_final = 1)
+    业务->>业务: 用本地自描述缓存补齐名称/分组/单位
 ```
 
 ```c
-/* 读取运行参数，并同时拉取参数描述信息，用于首屏建模。 */
+/* 读取运行参数值；参数描述和分组信息来自上层自描述缓存。 */
 iec_parameter_read_request_t req = {
     .common_address = 1,                        /* 目标公共地址 */
     .read_mode = IEC_PARAMETER_READ_BY_SCOPE,  /* 按参数域读取 */
     .scope = IEC_PARAMETER_SCOPE_RUNNING,      /* 运行参数 */
-    .group_name = NULL,                        /* 不按分组过滤 */
     .start_address = 0,                        /* 非地址范围模式时忽略 */
     .end_address = 0,                          /* 非地址范围模式时忽略 */
-    .setting_group = 0,                        /* 0 表示当前定值区 */
-    .include_descriptor = 1                    /* 同时返回参数描述信息 */
+    .setting_group = 0                         /* 0 表示当前定值区 */
 };
 
 uint32_t request_id = 0;
@@ -2114,12 +2134,8 @@ static void on_parameter_indication(
     (void)session;
     (void)user_context;
 
-    /* 首次建模场景下可以同时缓存参数值与参数描述。 */
-    if (indication->has_descriptor) {
-        /* 缓存参数名称、单位、范围和模板能力。 */
-    }
-
     /* 将参数值拷贝到业务队列，避免在回调线程做重处理。 */
+    /* 业务线程可按 item.parameter_id 或 item.address 关联本地自描述缓存。 */
     if (indication->is_final) {
         /* 标记该 request_id 对应的参数读取完成。 */
     }
@@ -2128,11 +2144,12 @@ static void on_parameter_indication(
 
 推荐处理步骤如下：
 
-1. 首次接入终端时可设置 `include_descriptor = 1`，同时获取参数描述信息。
-2. 频繁刷新场景只拉取参数值，避免重复传输参数元数据。
-3. 上层按 `request_id` 归并一轮参数读取返回，并以 `is_final` 作为完成标识。
+1. 首次接入终端或设备模型变更时，先通过 `<prefix>_get_device_description` 获取 XML/msg 自描述内容，并由 UI 层解析、缓存参数描述、分组和地址映射。
+2. 用户按分组查看或刷新参数时，UI 层先把分组转换为参数域、地址范围或多个读取请求；不要期望终端定值召唤按分组名返回参数地址。
+3. 参数读取回调只处理参数值，上层按 `request_id` 归并一轮读取返回，并以 `is_final` 作为完成标识。
+4. 展示参数名称、单位、范围、分组和模板能力时，由业务线程使用本地自描述缓存补齐。
 
-### 7.6 参数写入与回读校验流程
+### 7.6 参数写入与显式回读校验流程
 
 ```mermaid
 sequenceDiagram
@@ -2145,7 +2162,8 @@ sequenceDiagram
     库-->>应用: IEC_STATUS_OK + request_id
     库->>终端: 下发参数写入请求
     终端-->>库: 参数写入确认
-    Note over 库,终端: verify_after_write = 1 时自动发起回读
+    库->>回调: on_parameter_result(ACCEPTED)
+    应用->>库: m101_verify_parameters(session, expected, &verify_id)
     库->>终端: 发起参数回读
     终端-->>库: 返回回读参数
     库->>回调: on_parameter_indication(indication)
@@ -2175,11 +2193,21 @@ iec_parameter_write_request_t write_req = {
     .setting_group = 0,                         /* 当前定值区 */
     .items = items,
     .item_count = 2,
-    .verify_after_write = 1                    /* 写后自动回读校验 */
+    .verify_after_write = 0                    /* 保留字段, 回读校验使用 verify_parameters */
 };
 
 uint32_t request_id = 0;
 m101_write_parameters(session, &write_req, &request_id);
+
+iec_parameter_verify_request_t verify_req = {
+    .common_address = 1,
+    .setting_group = 0,
+    .expected_items = items,
+    .item_count = 2
+};
+
+uint32_t verify_request_id = 0;
+m101_verify_parameters(session, &verify_req, &verify_request_id);
 
 static void on_parameter_result(
     iec_session_t *session,
@@ -2191,7 +2219,7 @@ static void on_parameter_result(
 
     if (result->operation == IEC_PARAMETER_OPERATION_WRITE &&
         result->result == IEC_PARAMETER_RESULT_ACCEPTED) {
-        /* 参数写入已被接受，等待自动回读校验结果。 */
+        /* 参数写入已被接受；如需校验，由上层显式发起 verify_parameters。 */
     }
 
     if (result->operation == IEC_PARAMETER_OPERATION_VERIFY &&
@@ -2203,8 +2231,8 @@ static void on_parameter_result(
 
 推荐处理步骤如下：
 
-1. 模板下发场景下建议始终开启 `verify_after_write`。
-2. 对重要参数可在写入完成后再次调用 `m101_verify_parameters` 做显式抽查。
+1. 参数写入接口只表示写入请求和写入确认，不自动回读校验。
+2. 模板下发、批量参数写入或关键参数修改后，建议上层显式调用 `m101_verify_parameters` 做回读校验。
 3. 当出现 `VERIFY_MISMATCH` 时，应结合 `on_parameter_indication` 中的回读值做差异定位。
 
 ### 7.7 定值区切换流程
@@ -2257,8 +2285,9 @@ sequenceDiagram
     库-->>应用: IEC_STATUS_OK + request_id
     库->>终端: 获取 XML/msg 自描述内容
     终端-->>库: 返回自描述分片
-    库->>回调: on_device_description(description)
-    回调->>业务: 缓存内容并触发解析
+    库->>回调: on_device_description(fragment)
+    回调->>业务: 按 request_id 拷贝并追加片段
+    回调->>业务: is_complete 后触发解析
     业务->>业务: 构建参数视图/模板基础数据
 ```
 
@@ -2280,9 +2309,9 @@ static void on_device_description(
     (void)session;
     (void)user_context;
 
-    /* 若内容分片返回，应按 request_id 聚合后再交给 XML/msg 解析层。 */
+    /* content 是当前片段；按 request_id 追加到上层缓存。 */
     if (description->is_complete) {
-        /* 触发模型解析和界面生成。 */
+        /* 当前请求的最后一片已到达，触发 XML/msg 解析和界面生成。 */
     }
 }
 ```
@@ -2290,8 +2319,9 @@ static void on_device_description(
 推荐处理步骤如下：
 
 1. 自描述内容获取应优先发生在首次连接和设备模型变更场景。
-2. 动态库只负责把 XML 或 msg 内容安全取回，不负责解析成最终界面。
-3. 上层可基于自描述内容构建参数模板、点表映射和界面分组信息。
+2. 动态库只负责把 XML 或 msg 内容按片段安全取回，不负责解析成最终界面，也不保证单次回调包含完整文件。
+3. 上层应按 `request_id` 聚合 `content` 片段；收到 `is_complete != 0` 后再交给 XML/msg 解析层。
+4. 上层可基于自描述内容构建参数模板、点表映射和界面分组信息。
 
 ### 7.9 文件目录召唤流程
 
@@ -2727,7 +2757,7 @@ session = NULL;
 
 ### 7.17 总召、电度量召唤与单点读取流程
 
-本流程用于覆盖主动获取点表数据的三类入口。持续上送走 `on_point_indication`，主动召唤和单点读取也通过同一个点表回调返回高层点值。
+本流程用于覆盖主动获取点表数据的三类入口。周期上送、变化遥测、变位遥信等终端主动上送走 `on_point_indication`，主动召唤和单点读取也通过同一个点表回调返回高层点值。总召用于建立或校准全量点表基线，不是触发点表回调的前置条件；对于平衡 101 或 104，会话进入可通信状态后，终端在总召前主动上送的点值报文也应按普通点表事件处理。
 
 ```mermaid
 sequenceDiagram
@@ -2779,8 +2809,10 @@ iec101_read_point(session, &point_addr);
 
 1. 建链完成或缓存失效后优先使用 `<prefix>_general_interrogation` 刷新全量点表状态。
 2. 电度量或累计量刷新使用 `<prefix>_counter_interrogation`，不要用普通总召替代电度量召唤语义。
-3. 对少量点位人工刷新或诊断时使用 `<prefix>_read_point`。
-4. 三类请求的同步返回只表示请求被接收，业务结果仍以 `on_point_indication` 和链路事件为准。
+3. 对少量点位人工刷新、诊断或补读时可使用 `<prefix>_read_point`；该接口封装标准读命令 `C_RD_NA_1`，终端是否支持需要以厂家实现和现场联调结果为准。
+4. 总召前收到的主动上送可以先更新业务缓存或进入事件队列，但业务系统应将点表状态标记为“未完成全量初始化”，直到总召完成后再认为全量基线已建立。
+5. 不要用 `<prefix>_read_point` 表达参数读取、定值区读取、文件读取或点表配置读取，这些语义应使用专用接口。
+6. 三类请求的同步返回只表示请求被接收，业务结果仍以 `on_point_indication` 和链路事件为准。
 
 ### 7.18 原始 ASDU 主动发送流程
 
@@ -2919,6 +2951,7 @@ m101_get_file_transfer_status(session, transfer_id, &status);
 ### 8.4 高层数据主路径与原始旁路关系
 
 - 高层点表接口是默认主路径，业务系统应优先依赖 `on_point_indication`。
+- 变化遥测、变位遥信和周期上送仍属于点表主路径，不单独拆分专属回调；上层通过 `point_type`、`type_id`、`cause_of_transmission`、质量位和时标信息完成业务分流。
 - 参数接口是独立主路径，参数读取和参数写入不应通过点表接口或遥控接口拼装实现。
 - 文件接口是独立主路径，目录召唤、文件传输和断点续传不应通过 `<prefix>_send_raw_asdu` 或自定义旁路报文暴露给上层。
 - 程序升级接口是独立高层主路径，启动升级、执行升级、文件写入和升级结束不应要求上层手工拼装多个底层调用。
@@ -2930,7 +2963,7 @@ m101_get_file_transfer_status(session, transfer_id, &status);
 
 ### 8.5 参数与文件接口边界
 
-- 动态库负责参数读取、参数写入、回读校验、定值区切换、自描述获取以及协议字段与高层参数对象之间的映射。
+- 动态库负责参数读取、参数写入、回读校验、定值区切换、自描述原始内容获取以及协议字段与高层参数值对象之间的映射。
 - 动态库负责文件目录召唤、文件读取、文件写入、传输状态维护、取消和断点续传恢复点管理。
 - 动态库负责程序升级协议状态机、升级命令封装、文件写入阶段编排、升级结束命令和升级结果归并。
 - 动态库负责校时和读取终端当前时间的协议交互以及结果回调。
@@ -2938,6 +2971,7 @@ m101_get_file_transfer_status(session, transfer_id, &status);
 - 本地文件的落盘、缓存目录管理、升级包来源校验、可信验签、散列计算和断点内容持久化由上层应用负责，不纳入动态库职责范围。
 - 证书导入导出、终端初始证书回写、密钥恢复、USB Key 登录、软件授权、可信验签和安全审计由安全适配层或上层应用负责，不纳入协议层 SDK 职责范围。
 - 自描述内容的 XML 或 msg 解析、参数分组展示、界面控件生成和参数变更审计由上层应用负责。
+- 参数名称、分组、单位、范围、缺省值和模板能力由上层解析自描述后缓存；定值召唤和参数读取回调只返回参数值，不返回这些描述元数据。
 - 无线模块、电源模块、线损模块在接口层统一视为参数域，避免为具体业务模块重复设计函数族。
 - `<prefix>_read_point` 适合点表对象读取，不负责表达“读取全部运行参数”“读取某定值区全部参数”这类参数语义。
 - 点表在线读取、修改和点表模板下发校验属于参数接口范畴，使用 `IEC_PARAMETER_SCOPE_POINT_TABLE` 表达点表配置域；实时点值召测和上送仍属于点表接口范畴。

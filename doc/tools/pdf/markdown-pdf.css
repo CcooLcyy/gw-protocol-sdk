@@ -133,6 +133,36 @@ table {
   font-size: 9.8pt;
 }
 
+body > h1:first-of-type + h2 + table {
+  width: 86%;
+  margin-left: 0;
+  margin-right: auto;
+}
+
+body > h1:first-of-type + h2 + table col:nth-child(1),
+body > h1:first-of-type + h2 + table th:nth-child(1),
+body > h1:first-of-type + h2 + table td:nth-child(1) {
+  width: 10%;
+}
+
+body > h1:first-of-type + h2 + table col:nth-child(2),
+body > h1:first-of-type + h2 + table th:nth-child(2),
+body > h1:first-of-type + h2 + table td:nth-child(2) {
+  width: 18%;
+}
+
+body > h1:first-of-type + h2 + table col:nth-child(3),
+body > h1:first-of-type + h2 + table th:nth-child(3),
+body > h1:first-of-type + h2 + table td:nth-child(3) {
+  width: 15%;
+}
+
+body > h1:first-of-type + h2 + table col:nth-child(4),
+body > h1:first-of-type + h2 + table th:nth-child(4),
+body > h1:first-of-type + h2 + table td:nth-child(4) {
+  width: 57%;
+}
+
 tr > :first-child:nth-last-child(2) {
   width: 22%;
 }
