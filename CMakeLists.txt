@@ -66,9 +66,10 @@ if(BUILD_TESTING)
         m101.read_point
         m101.clock
         m101.parameters
-        m101.device_description
         m101.file_transfer
+        m101.file_read_window
         m101.upgrade
+        m101.pending_timeouts
         iec101.validate_config
         iec101.lifecycle
         iec101.raw_asdu
@@ -78,7 +79,6 @@ if(BUILD_TESTING)
         iec101.read_point
         iec101.clock
         iec101.parameters
-        iec101.device_description
         iec101.file_transfer
         iec101.upgrade
         iec104.validate_config
@@ -90,7 +90,6 @@ if(BUILD_TESTING)
         iec104.read_point
         iec104.clock
         iec104.parameters
-        iec104.device_description
         iec104.file_transfer
         iec104.upgrade
     )

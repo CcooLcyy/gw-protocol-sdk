@@ -270,12 +270,19 @@ struct StateRecorder {
 
     std::vector<ParameterResultEvent> parameter_results;
 
-    struct DeviceDescriptionEvent {
-        iec_device_description_t description{};
-        std::vector<uint8_t> content;
+    struct LinkEvent {
+        iec_link_event_t event = IEC_LINK_EVENT_LINK_ERROR;
+        iec_status_t reason = IEC_STATUS_INTERNAL_ERROR;
     };
 
-    std::vector<DeviceDescriptionEvent> device_descriptions;
+    std::vector<LinkEvent> link_events;
+
+    struct LogEvent {
+        iec_log_level_t level = IEC_LOG_INFO;
+        std::string message;
+    };
+
+    std::vector<LogEvent> log_events;
 
     struct FileListEvent {
         iec_file_list_indication_t indication{};
@@ -305,12 +312,6 @@ struct StateRecorder {
     };
 
     std::vector<FileResultEvent> file_results;
-
-    struct UpgradeProgressEvent {
-        iec_upgrade_progress_t progress{};
-    };
-
-    std::vector<UpgradeProgressEvent> upgrade_progress;
 
     struct UpgradeResultEvent {
         iec_upgrade_result_t result{};
@@ -363,18 +364,26 @@ struct StateRecorder {
         cv.notify_all();
     }
 
-    void record_device_description(const iec_device_description_t &description)
+    void record_link_event(iec_link_event_t event, iec_status_t reason)
     {
-        DeviceDescriptionEvent snapshot{};
-        snapshot.description = description;
-        if (description.content != nullptr && description.content_size > 0) {
-            snapshot.content.assign(description.content, description.content + description.content_size);
-            snapshot.description.content = snapshot.content.data();
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            link_events.push_back(LinkEvent{event, reason});
+        }
+        cv.notify_all();
+    }
+
+    void record_log(iec_log_level_t level, const char *message)
+    {
+        LogEvent snapshot{};
+        snapshot.level = level;
+        if (message != nullptr) {
+            snapshot.message = message;
         }
 
         {
             std::lock_guard<std::mutex> lock(mutex);
-            device_descriptions.push_back(std::move(snapshot));
+            log_events.push_back(std::move(snapshot));
         }
         cv.notify_all();
     }
@@ -460,15 +469,6 @@ struct StateRecorder {
         {
             std::lock_guard<std::mutex> lock(mutex);
             file_results.push_back(std::move(snapshot));
-        }
-        cv.notify_all();
-    }
-
-    void record_upgrade_progress(const iec_upgrade_progress_t &progress)
-    {
-        {
-            std::lock_guard<std::mutex> lock(mutex);
-            upgrade_progress.push_back(UpgradeProgressEvent{progress});
         }
         cv.notify_all();
     }
@@ -569,10 +569,16 @@ struct StateRecorder {
         return parameter_results;
     }
 
-    std::vector<DeviceDescriptionEvent> device_description_snapshot() const
+    std::vector<LinkEvent> link_event_snapshot() const
     {
         std::lock_guard<std::mutex> lock(mutex);
-        return device_descriptions;
+        return link_events;
+    }
+
+    std::vector<LogEvent> log_snapshot() const
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        return log_events;
     }
 
     std::vector<FileListEvent> file_list_snapshot() const
@@ -591,12 +597,6 @@ struct StateRecorder {
     {
         std::lock_guard<std::mutex> lock(mutex);
         return file_results;
-    }
-
-    std::vector<UpgradeProgressEvent> upgrade_progress_snapshot() const
-    {
-        std::lock_guard<std::mutex> lock(mutex);
-        return upgrade_progress;
     }
 
     std::vector<UpgradeResultEvent> upgrade_result_snapshot() const
@@ -653,11 +653,19 @@ struct StateRecorder {
         });
     }
 
-    bool wait_until_device_description_count(std::size_t count)
+    bool wait_until_link_event_count(std::size_t count)
     {
         std::unique_lock<std::mutex> lock(mutex);
         return cv.wait_for(lock, kStateWaitTimeout, [&] {
-            return device_descriptions.size() >= count;
+            return link_events.size() >= count;
+        });
+    }
+
+    bool wait_until_log_count(std::size_t count)
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        return cv.wait_for(lock, kStateWaitTimeout, [&] {
+            return log_events.size() >= count;
         });
     }
 
@@ -685,19 +693,19 @@ struct StateRecorder {
         });
     }
 
-    bool wait_until_upgrade_progress_count(std::size_t count)
-    {
-        std::unique_lock<std::mutex> lock(mutex);
-        return cv.wait_for(lock, kStateWaitTimeout, [&] {
-            return upgrade_progress.size() >= count;
-        });
-    }
-
     bool wait_until_upgrade_result_count(std::size_t count)
     {
         std::unique_lock<std::mutex> lock(mutex);
         return cv.wait_for(lock, kStateWaitTimeout, [&] {
             return upgrade_results.size() >= count;
+        });
+    }
+
+    bool wait_until_raw_count(std::size_t count)
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        return cv.wait_for(lock, kStateWaitTimeout, [&] {
+            return raw_events.size() >= count;
         });
     }
 };
@@ -710,6 +718,20 @@ void on_session_state(iec_session_t *session, iec_runtime_state_t state, void *u
         return;
     }
     recorder->record(state);
+}
+
+void on_link_event(
+    iec_session_t *session,
+    iec_link_event_t event,
+    iec_status_t reason,
+    void *user_context)
+{
+    (void)session;
+    auto *recorder = static_cast<StateRecorder *>(user_context);
+    if (recorder == nullptr) {
+        return;
+    }
+    recorder->record_link_event(event, reason);
 }
 
 void on_raw_asdu(iec_session_t *session, const iec_raw_asdu_event_t *event, void *user_context)
@@ -779,19 +801,6 @@ void on_parameter_result(iec_session_t *session, const iec_parameter_result_t *r
     recorder->record_parameter_result(*result);
 }
 
-void on_device_description(
-    iec_session_t *session,
-    const iec_device_description_t *description,
-    void *user_context)
-{
-    (void)session;
-    auto *recorder = static_cast<StateRecorder *>(user_context);
-    if (recorder == nullptr || description == nullptr) {
-        return;
-    }
-    recorder->record_device_description(*description);
-}
-
 void on_file_list_indication(
     iec_session_t *session,
     const iec_file_list_indication_t *indication,
@@ -831,19 +840,6 @@ void on_file_operation_result(
     recorder->record_file_result(*result);
 }
 
-void on_upgrade_progress(
-    iec_session_t *session,
-    const iec_upgrade_progress_t *progress,
-    void *user_context)
-{
-    (void)session;
-    auto *recorder = static_cast<StateRecorder *>(user_context);
-    if (recorder == nullptr || progress == nullptr) {
-        return;
-    }
-    recorder->record_upgrade_progress(*progress);
-}
-
 void on_upgrade_result(
     iec_session_t *session,
     const iec_upgrade_result_t *result,
@@ -855,6 +851,16 @@ void on_upgrade_result(
         return;
     }
     recorder->record_upgrade_result(*result);
+}
+
+void on_log(iec_session_t *session, iec_log_level_t level, const char *message, void *user_context)
+{
+    (void)session;
+    auto *recorder = static_cast<StateRecorder *>(user_context);
+    if (recorder == nullptr) {
+        return;
+    }
+    recorder->record_log(level, message);
 }
 
 iec_session_config_t make_common_config(StateRecorder &recorder)
@@ -885,18 +891,18 @@ iec_callbacks_t make_callbacks()
 {
     iec_callbacks_t callbacks{};
     callbacks.on_session_state = on_session_state;
+    callbacks.on_link_event = on_link_event;
     callbacks.on_point_indication = on_point_indication;
     callbacks.on_command_result = on_command_result;
-    callbacks.on_raw_asdu = on_raw_asdu;
-    callbacks.on_clock_result = on_clock_result;
-    callbacks.on_parameter_indication = on_parameter_indication;
-    callbacks.on_parameter_result = on_parameter_result;
-    callbacks.on_device_description = on_device_description;
     callbacks.on_file_list_indication = on_file_list_indication;
     callbacks.on_file_data_indication = on_file_data_indication;
     callbacks.on_file_operation_result = on_file_operation_result;
-    callbacks.on_upgrade_progress = on_upgrade_progress;
     callbacks.on_upgrade_result = on_upgrade_result;
+    callbacks.on_clock_result = on_clock_result;
+    callbacks.on_parameter_indication = on_parameter_indication;
+    callbacks.on_parameter_result = on_parameter_result;
+    callbacks.on_raw_asdu = on_raw_asdu;
+    callbacks.on_log = on_log;
     return callbacks;
 }
 
@@ -995,6 +1001,8 @@ void exercise_lifecycle(
     StateRecorder recorder;
     MockTransport mock;
     auto common = make_common_config(recorder);
+    common.enable_log_callback = 1;
+    common.initial_log_level = IEC_LOG_WARN;
     auto transport = make_transport(mock);
     auto callbacks = make_callbacks();
 
@@ -1051,6 +1059,10 @@ void exercise_lifecycle(
 
         EXPECT_STATUS(start(session), IEC_STATUS_OK);
         EXPECT_TRUE(recorder.wait_until_contains(IEC_RUNTIME_RUNNING));
+        EXPECT_TRUE(recorder.wait_until_log_count(2));
+        auto logs = recorder.log_snapshot();
+        EXPECT_TRUE(logs.size() >= 2);
+        EXPECT_TRUE(logs[0].level == IEC_LOG_INFO);
         EXPECT_STATUS(get_state(session, &state), IEC_STATUS_OK);
         EXPECT_STATE(state, IEC_RUNTIME_RUNNING);
 
@@ -1064,6 +1076,7 @@ void exercise_lifecycle(
 
         EXPECT_STATUS(stop(session, 1000), IEC_STATUS_OK);
         EXPECT_TRUE(recorder.wait_until_contains(IEC_RUNTIME_STOPPED));
+        EXPECT_TRUE(recorder.wait_until_log_count(3));
         EXPECT_STATUS(get_state(session, &state), IEC_STATUS_OK);
         EXPECT_STATE(state, IEC_RUNTIME_STOPPED);
         expect_state_history(
@@ -1121,6 +1134,21 @@ void exercise_raw_asdu(
         short_raw_payload,
         static_cast<uint32_t>(sizeof(short_raw_payload)),
         0};
+    const uint8_t zero_type_payload[] = {0, 1, 6, 0, 1, 0};
+    const iec_raw_asdu_tx_t zero_type_request{
+        zero_type_payload,
+        static_cast<uint32_t>(sizeof(zero_type_payload)),
+        0};
+    const uint8_t zero_count_payload[] = {100, 0, 6, 0, 1, 0};
+    const iec_raw_asdu_tx_t zero_count_request{
+        zero_count_payload,
+        static_cast<uint32_t>(sizeof(zero_count_payload)),
+        0};
+    const uint8_t zero_cause_payload[] = {100, 1, 0, 0, 1, 0};
+    const iec_raw_asdu_tx_t zero_cause_request{
+        zero_cause_payload,
+        static_cast<uint32_t>(sizeof(zero_cause_payload)),
+        0};
     const iec_raw_asdu_tx_t null_payload_request{nullptr, raw_payload_size, 0};
     const iec_raw_asdu_tx_t invalid_flag_request{raw_payload, raw_payload_size, 2};
 
@@ -1151,11 +1179,16 @@ void exercise_raw_asdu(
             IEC_STATUS_OK);
         EXPECT_STATUS(send_raw(session, &null_payload_request), IEC_STATUS_INVALID_ARGUMENT);
         EXPECT_STATUS(send_raw(session, &short_raw_request), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(send_raw(session, &zero_type_request), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(send_raw(session, &zero_count_request), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(send_raw(session, &zero_cause_request), IEC_STATUS_INVALID_ARGUMENT);
         EXPECT_STATUS(send_raw(session, &invalid_flag_request), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_TRUE(mock.send_count == 0);
         EXPECT_STATUS(send_raw(session, &raw_request), IEC_STATUS_OK);
 
         EXPECT_TRUE(mock.send_count == 1);
         EXPECT_TRUE(mock.last_sent == expected_raw);
+        EXPECT_TRUE(recorder.wait_until_raw_count(1));
         const auto raw_events = recorder.raw_snapshot();
         EXPECT_TRUE(raw_events.size() == 1);
         EXPECT_TRUE(raw_events[0].direction == IEC_RAW_ASDU_TX);
@@ -1432,8 +1465,15 @@ void exercise_control_point(
     auto invalid_factory_reset_type = request;
     invalid_factory_reset_type.command_type = IEC_COMMAND_SETPOINT_SCALED;
     invalid_factory_reset_type.value.scaled = 10;
+    auto invalid_factory_reset_direct = request;
+    invalid_factory_reset_direct.mode = IEC_COMMAND_MODE_DIRECT;
     auto invalid_double_value = request;
     invalid_double_value.value.doubled = 4;
+    auto cancel_request = request;
+    cancel_request.mode = IEC_COMMAND_MODE_CANCEL;
+    cancel_request.semantic = IEC_COMMAND_SEMANTIC_DEVICE_REBOOT;
+    cancel_request.address.originator_address = 0;
+    cancel_request.qualifier = 1;
 
     const std::vector<uint8_t> expected_request{
         46,
@@ -1447,6 +1487,18 @@ void exercise_control_point(
         0x00,
         0x8e,
     };
+    const std::vector<uint8_t> expected_cancel_request{
+        46,
+        1,
+        8,
+        0,
+        1,
+        0,
+        0x01,
+        0x40,
+        0x00,
+        0x86,
+    };
     const std::vector<uint8_t> command_response{
         46,
         1,
@@ -1458,6 +1510,42 @@ void exercise_control_point(
         0x40,
         0x00,
         0x02,
+    };
+    const std::vector<uint8_t> cancel_response{
+        46,
+        1,
+        9,
+        0,
+        1,
+        0,
+        0x01,
+        0x40,
+        0x00,
+        0x02,
+    };
+    const std::vector<uint8_t> unmatched_cancel_response{
+        46,
+        1,
+        9,
+        7,
+        1,
+        0,
+        0x01,
+        0x40,
+        0x00,
+        0x02,
+    };
+    const std::vector<uint8_t> wrong_type_response{
+        45,
+        1,
+        7,
+        7,
+        1,
+        0,
+        0x01,
+        0x40,
+        0x00,
+        0x01,
     };
 
     uint32_t command_id = 99;
@@ -1485,6 +1573,7 @@ void exercise_control_point(
         EXPECT_STATUS(control_point(session, &invalid_mode, &command_id), IEC_STATUS_INVALID_ARGUMENT);
         EXPECT_STATUS(control_point(session, &invalid_flag, &command_id), IEC_STATUS_INVALID_ARGUMENT);
         EXPECT_STATUS(control_point(session, &invalid_factory_reset_type, &command_id), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(control_point(session, &invalid_factory_reset_direct, &command_id), IEC_STATUS_INVALID_ARGUMENT);
         EXPECT_STATUS(control_point(session, &invalid_double_value, &command_id), IEC_STATUS_INVALID_ARGUMENT);
         EXPECT_STATUS(control_point(session, &request, &command_id), IEC_STATUS_BAD_STATE);
         EXPECT_TRUE(command_id == 0);
@@ -1497,9 +1586,14 @@ void exercise_control_point(
         EXPECT_TRUE(mock.send_count == 1);
         EXPECT_TRUE(mock.last_sent == expected_request);
 
+        EXPECT_STATUS(control_point(session, &cancel_request, &command_id), IEC_STATUS_OK);
+        EXPECT_TRUE(command_id == 2);
+        EXPECT_TRUE(mock.send_count == 2);
+        EXPECT_TRUE(mock.last_sent == expected_cancel_request);
+
         uint32_t second_command_id = 0;
-        EXPECT_STATUS(control_point(session, &request, &second_command_id), IEC_STATUS_OK);
-        EXPECT_TRUE(second_command_id == 2);
+        EXPECT_STATUS(control_point(session, &request, &second_command_id), IEC_STATUS_BUSY);
+        EXPECT_TRUE(second_command_id == 0);
         EXPECT_TRUE(mock.send_count == 2);
 
         push_recv(mock, command_response);
@@ -1515,6 +1609,38 @@ void exercise_control_point(
         EXPECT_TRUE(commands[0].result.address.type_id == 46);
         EXPECT_TRUE(commands[0].result.address.cause_of_transmission == 7);
         EXPECT_TRUE(commands[0].result.address.originator_address == 7);
+
+        push_recv(mock, cancel_response);
+        EXPECT_TRUE(recorder.wait_until_command_count(2));
+        const auto commands_after_cancel = recorder.command_snapshot();
+        EXPECT_TRUE(commands_after_cancel.size() == 2);
+        EXPECT_TRUE(commands_after_cancel[1].result.command_id == 2);
+        EXPECT_TRUE(commands_after_cancel[1].result.semantic == IEC_COMMAND_SEMANTIC_DEVICE_REBOOT);
+        EXPECT_TRUE(commands_after_cancel[1].result.address.cause_of_transmission == 9);
+
+        EXPECT_STATUS(control_point(session, &request, &second_command_id), IEC_STATUS_OK);
+        EXPECT_TRUE(second_command_id == 3);
+        EXPECT_TRUE(mock.send_count == 3);
+        push_recv(mock, unmatched_cancel_response);
+        EXPECT_TRUE(recorder.wait_until_command_count(3));
+        const auto commands_after_mismatch = recorder.command_snapshot();
+        EXPECT_TRUE(commands_after_mismatch.size() == 3);
+        EXPECT_TRUE(commands_after_mismatch[2].result.command_id == 3);
+        EXPECT_TRUE(commands_after_mismatch[2].result.semantic == IEC_COMMAND_SEMANTIC_FACTORY_RESET);
+        EXPECT_TRUE(commands_after_mismatch[2].result.result == IEC_COMMAND_RESULT_PROTOCOL_ERROR);
+        EXPECT_TRUE(commands_after_mismatch[2].result.address.cause_of_transmission == 9);
+
+        EXPECT_STATUS(control_point(session, &request, &second_command_id), IEC_STATUS_OK);
+        EXPECT_TRUE(second_command_id == 4);
+        EXPECT_TRUE(mock.send_count == 4);
+        push_recv(mock, wrong_type_response);
+        EXPECT_TRUE(recorder.wait_until_command_count(4));
+        const auto commands_after_wrong_type = recorder.command_snapshot();
+        EXPECT_TRUE(commands_after_wrong_type.size() == 4);
+        EXPECT_TRUE(commands_after_wrong_type[3].result.command_id == 4);
+        EXPECT_TRUE(commands_after_wrong_type[3].result.semantic == IEC_COMMAND_SEMANTIC_FACTORY_RESET);
+        EXPECT_TRUE(commands_after_wrong_type[3].result.result == IEC_COMMAND_RESULT_PROTOCOL_ERROR);
+        EXPECT_TRUE(commands_after_wrong_type[3].result.address.type_id == 45);
 
         EXPECT_STATUS(stop(session, 1000), IEC_STATUS_OK);
         EXPECT_STATUS(destroy(session), IEC_STATUS_OK);
@@ -1733,6 +1859,46 @@ void exercise_clock(
         5,
         26,
     };
+    const std::vector<uint8_t> read_negative_response{
+        103,
+        1,
+        0x45,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+    };
+    const std::vector<uint8_t> read_unsupported_response{
+        102,
+        1,
+        0x2f,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+    };
+    const std::vector<uint8_t> read_wrong_cause_response{
+        103,
+        1,
+        7,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0x39,
+        0x30,
+        34,
+        12,
+        15,
+        5,
+        26,
+    };
 
     uint32_t request_id = 99;
     EXPECT_STATUS(clock_sync(nullptr, &sync_request, &request_id), IEC_STATUS_INVALID_ARGUMENT);
@@ -1806,6 +1972,37 @@ void exercise_clock(
         EXPECT_TRUE(clocks[1].result.timestamp.invalid == 0);
         EXPECT_TRUE(clocks[1].result.cause_of_transmission == 5);
 
+        EXPECT_STATUS(read_clock(session, &read_request, &request_id), IEC_STATUS_OK);
+        EXPECT_TRUE(request_id == 3);
+        push_recv(mock, read_negative_response);
+        EXPECT_TRUE(recorder.wait_until_clock_count(3));
+
+        EXPECT_STATUS(read_clock(session, &read_request, &request_id), IEC_STATUS_OK);
+        EXPECT_TRUE(request_id == 4);
+        push_recv(mock, read_unsupported_response);
+        EXPECT_TRUE(recorder.wait_until_clock_count(4));
+
+        EXPECT_STATUS(read_clock(session, &read_request, &request_id), IEC_STATUS_OK);
+        EXPECT_TRUE(request_id == 5);
+        push_recv(mock, read_wrong_cause_response);
+        EXPECT_TRUE(recorder.wait_until_clock_count(5));
+
+        const auto clocks_after_failures = recorder.clock_snapshot();
+        EXPECT_TRUE(clocks_after_failures.size() == 5);
+        EXPECT_TRUE(clocks_after_failures[2].result.request_id == 3);
+        EXPECT_TRUE(clocks_after_failures[2].result.operation == IEC_CLOCK_OPERATION_READ);
+        EXPECT_TRUE(clocks_after_failures[2].result.result == IEC_CLOCK_RESULT_NEGATIVE_CONFIRM);
+        EXPECT_TRUE(clocks_after_failures[2].result.has_timestamp == 0);
+        EXPECT_TRUE(clocks_after_failures[2].result.cause_of_transmission == 5);
+        EXPECT_TRUE(clocks_after_failures[3].result.request_id == 4);
+        EXPECT_TRUE(clocks_after_failures[3].result.operation == IEC_CLOCK_OPERATION_READ);
+        EXPECT_TRUE(clocks_after_failures[3].result.result == IEC_CLOCK_RESULT_UNSUPPORTED);
+        EXPECT_TRUE(clocks_after_failures[3].result.cause_of_transmission == 47);
+        EXPECT_TRUE(clocks_after_failures[4].result.request_id == 5);
+        EXPECT_TRUE(clocks_after_failures[4].result.operation == IEC_CLOCK_OPERATION_READ);
+        EXPECT_TRUE(clocks_after_failures[4].result.result == IEC_CLOCK_RESULT_PROTOCOL_ERROR);
+        EXPECT_TRUE(clocks_after_failures[4].result.cause_of_transmission == 7);
+
         EXPECT_STATUS(stop(session, 1000), IEC_STATUS_OK);
         EXPECT_STATUS(destroy(session), IEC_STATUS_OK);
         session = nullptr;
@@ -1826,7 +2023,6 @@ template <
     typename StopFn,
     typename ReadParametersFn,
     typename WriteParametersFn,
-    typename VerifyParametersFn,
     typename SwitchSettingGroupFn>
 void exercise_parameters(
     const char *name,
@@ -1837,7 +2033,6 @@ void exercise_parameters(
     StopFn stop,
     ReadParametersFn read_parameters,
     WriteParametersFn write_parameters,
-    VerifyParametersFn verify_parameters,
     SwitchSettingGroupFn switch_setting_group)
 {
     StateRecorder recorder;
@@ -1854,7 +2049,6 @@ void exercise_parameters(
     read_request.start_address = 0x1000;
     read_request.end_address = 0x1001;
     read_request.setting_group = 2;
-    read_request.include_descriptor = 1;
 
     iec_parameter_item_t write_items[2]{};
     write_items[0].parameter_id = 10;
@@ -1871,15 +2065,19 @@ void exercise_parameters(
     iec_parameter_write_request_t write_request{};
     write_request.common_address = 1;
     write_request.setting_group = 2;
+    write_request.mode = IEC_PARAMETER_WRITE_MODE_PRESET;
     write_request.items = write_items;
     write_request.item_count = 2;
-    write_request.verify_after_write = 1;
 
-    iec_parameter_verify_request_t verify_request{};
-    verify_request.common_address = 1;
-    verify_request.setting_group = 2;
-    verify_request.expected_items = write_items;
-    verify_request.item_count = 2;
+    iec_parameter_write_request_t execute_request{};
+    execute_request.common_address = 1;
+    execute_request.setting_group = 2;
+    execute_request.mode = IEC_PARAMETER_WRITE_MODE_EXECUTE;
+
+    iec_parameter_write_request_t cancel_request{};
+    cancel_request.common_address = 1;
+    cancel_request.setting_group = 2;
+    cancel_request.mode = IEC_PARAMETER_WRITE_MODE_CANCEL;
 
     iec_setting_group_request_t get_group{};
     get_group.common_address = 1;
@@ -1892,17 +2090,18 @@ void exercise_parameters(
     switch_group.target_group = 3;
 
     const std::vector<uint8_t> expected_read_request{
-        202, 1, 5, 0, 1, 0, 0, 0, 0, 2, 2, 4, 2, 0x00, 0x10, 0, 0, 0x01, 0x10, 0, 0, 0,
+        202, 1, 5, 0, 1, 0, 0, 0, 0, 2, 0, 3, 2, 0x00, 0x10, 0, 0, 0x01, 0x10, 0, 0,
     };
     const std::vector<uint8_t> expected_write_request{
-        203, 1, 6, 0, 1, 0, 0, 0, 0, 2, 2, 2,
+        203, 1, 6, 0, 1, 0, 0, 0, 0, 2, 4, 1, 2,
         10, 0, 0, 0, 0x00, 0x10, 0, 0, 2, 3, 4, 0xd2, 0x04, 0, 0,
         11, 0, 0, 0, 0x01, 0x10, 0, 0, 2, 1, 1, 1,
     };
-    const std::vector<uint8_t> expected_verify_request{
-        204, 1, 6, 0, 1, 0, 0, 0, 0, 2, 0, 2,
-        10, 0, 0, 0, 0x00, 0x10, 0, 0, 2, 3, 4, 0xd2, 0x04, 0, 0,
-        11, 0, 0, 0, 0x01, 0x10, 0, 0, 2, 1, 1, 1,
+    const std::vector<uint8_t> expected_execute_request{
+        203, 1, 6, 0, 1, 0, 0, 0, 0, 2, 8, 2, 0,
+    };
+    const std::vector<uint8_t> expected_cancel_request{
+        203, 1, 6, 0, 1, 0, 0, 0, 0, 2, 12, 3, 0,
     };
     const std::vector<uint8_t> expected_get_group_request{
         205, 1, 6, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0,
@@ -1914,11 +2113,14 @@ void exercise_parameters(
         202, 1, 10, 0, 1, 0, 0, 0, 0, 2, 3,
         10, 0, 0, 0, 0x00, 0x10, 0, 0, 2, 3, 4, 0xd2, 0x04, 0, 0,
     };
-    const std::vector<uint8_t> write_response{
-        203, 1, 7, 0, 1, 0, 0, 0, 0, 2, 1, 10, 0, 0, 0, 0x00, 0x10, 0, 0,
+    const std::vector<uint8_t> preset_response{
+        203, 1, 7, 0, 1, 0, 0, 0, 0, 2, 5, 10, 0, 0, 0, 0x00, 0x10, 0, 0,
     };
-    const std::vector<uint8_t> verify_response{
-        204, 1, 7, 0, 1, 0, 0, 0, 0, 2, 1, 10, 0, 0, 0, 0x00, 0x10, 0, 0,
+    const std::vector<uint8_t> execute_response{
+        203, 1, 7, 0, 1, 0, 0, 0, 0, 2, 9, 10, 0, 0, 0, 0x00, 0x10, 0, 0,
+    };
+    const std::vector<uint8_t> cancel_response{
+        203, 1, 7, 0, 1, 0, 0, 0, 0, 2, 13, 10, 0, 0, 0, 0x00, 0x10, 0, 0,
     };
     const std::vector<uint8_t> current_group_response{
         205, 1, 5, 0, 1, 0, 0, 0, 0, 2, 1,
@@ -1947,13 +2149,16 @@ void exercise_parameters(
         invalid_read.start_address = 2;
         invalid_read.end_address = 1;
         auto invalid_write = write_request;
-        invalid_write.verify_after_write = 2;
+        invalid_write.mode = IEC_PARAMETER_WRITE_MODE_NONE;
         auto invalid_item = write_items[0];
         invalid_item.value_type = IEC_PARAMETER_VALUE_STRING;
         invalid_item.value.string_value = nullptr;
         iec_parameter_write_request_t invalid_items_request = write_request;
         invalid_items_request.items = &invalid_item;
         invalid_items_request.item_count = 1;
+        auto invalid_execute_with_items = execute_request;
+        invalid_execute_with_items.items = write_items;
+        invalid_execute_with_items.item_count = 1;
         auto invalid_switch = switch_group;
         invalid_switch.target_group = 0;
 
@@ -1961,7 +2166,7 @@ void exercise_parameters(
         EXPECT_STATUS(read_parameters(session, &invalid_read, &request_id), IEC_STATUS_INVALID_ARGUMENT);
         EXPECT_STATUS(write_parameters(session, &invalid_write, &request_id), IEC_STATUS_INVALID_ARGUMENT);
         EXPECT_STATUS(write_parameters(session, &invalid_items_request, &request_id), IEC_STATUS_INVALID_ARGUMENT);
-        EXPECT_STATUS(verify_parameters(session, nullptr, &request_id), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(write_parameters(session, &invalid_execute_with_items, &request_id), IEC_STATUS_INVALID_ARGUMENT);
         EXPECT_STATUS(switch_setting_group(session, &invalid_switch, &request_id), IEC_STATUS_INVALID_ARGUMENT);
         EXPECT_STATUS(read_parameters(session, &read_request, &request_id), IEC_STATUS_BAD_STATE);
         EXPECT_TRUE(request_id == 0);
@@ -1972,6 +2177,9 @@ void exercise_parameters(
         EXPECT_STATUS(read_parameters(session, &read_request, &request_id), IEC_STATUS_OK);
         EXPECT_TRUE(request_id == 1);
         EXPECT_TRUE(mock.last_sent == expected_read_request);
+        uint32_t busy_request_id = 99;
+        EXPECT_STATUS(read_parameters(session, &read_request, &busy_request_id), IEC_STATUS_BUSY);
+        EXPECT_TRUE(busy_request_id == 0);
         push_recv(mock, read_response);
         EXPECT_TRUE(recorder.wait_until_parameter_indication_count(1));
         const auto indications = recorder.parameter_indication_snapshot();
@@ -1980,7 +2188,6 @@ void exercise_parameters(
         EXPECT_TRUE(indications[0].indication.operation == IEC_PARAMETER_OPERATION_READ);
         EXPECT_TRUE(indications[0].indication.setting_group == 2);
         EXPECT_TRUE(indications[0].indication.is_final == 1);
-        EXPECT_TRUE(indications[0].indication.has_descriptor == 1);
         EXPECT_TRUE(indications[0].indication.item.parameter_id == 10);
         EXPECT_TRUE(indications[0].indication.item.address == 0x1000);
         EXPECT_TRUE(indications[0].indication.item.value_type == IEC_PARAMETER_VALUE_UINT);
@@ -1989,44 +2196,62 @@ void exercise_parameters(
         EXPECT_STATUS(write_parameters(session, &write_request, &request_id), IEC_STATUS_OK);
         EXPECT_TRUE(request_id == 2);
         EXPECT_TRUE(mock.last_sent == expected_write_request);
-        push_recv(mock, write_response);
+        busy_request_id = 99;
+        EXPECT_STATUS(write_parameters(session, &write_request, &busy_request_id), IEC_STATUS_BUSY);
+        EXPECT_TRUE(busy_request_id == 0);
+        push_recv(mock, preset_response);
         EXPECT_TRUE(recorder.wait_until_parameter_result_count(1));
 
-        EXPECT_STATUS(verify_parameters(session, &verify_request, &request_id), IEC_STATUS_OK);
+        EXPECT_STATUS(write_parameters(session, &execute_request, &request_id), IEC_STATUS_OK);
         EXPECT_TRUE(request_id == 3);
-        EXPECT_TRUE(mock.last_sent == expected_verify_request);
-        push_recv(mock, verify_response);
+        EXPECT_TRUE(mock.last_sent == expected_execute_request);
+        push_recv(mock, execute_response);
         EXPECT_TRUE(recorder.wait_until_parameter_result_count(2));
 
-        EXPECT_STATUS(switch_setting_group(session, &get_group, &request_id), IEC_STATUS_OK);
+        EXPECT_STATUS(write_parameters(session, &cancel_request, &request_id), IEC_STATUS_OK);
         EXPECT_TRUE(request_id == 4);
-        EXPECT_TRUE(mock.last_sent == expected_get_group_request);
-        push_recv(mock, current_group_response);
+        EXPECT_TRUE(mock.last_sent == expected_cancel_request);
+        push_recv(mock, cancel_response);
         EXPECT_TRUE(recorder.wait_until_parameter_result_count(3));
 
-        EXPECT_STATUS(switch_setting_group(session, &switch_group, &request_id), IEC_STATUS_OK);
+        EXPECT_STATUS(switch_setting_group(session, &get_group, &request_id), IEC_STATUS_OK);
         EXPECT_TRUE(request_id == 5);
-        EXPECT_TRUE(mock.last_sent == expected_switch_group_request);
-        push_recv(mock, switch_group_response);
+        EXPECT_TRUE(mock.last_sent == expected_get_group_request);
+        push_recv(mock, current_group_response);
         EXPECT_TRUE(recorder.wait_until_parameter_result_count(4));
 
+        EXPECT_STATUS(switch_setting_group(session, &switch_group, &request_id), IEC_STATUS_OK);
+        EXPECT_TRUE(request_id == 6);
+        EXPECT_TRUE(mock.last_sent == expected_switch_group_request);
+        busy_request_id = 99;
+        EXPECT_STATUS(switch_setting_group(session, &switch_group, &busy_request_id), IEC_STATUS_BUSY);
+        EXPECT_TRUE(busy_request_id == 0);
+        push_recv(mock, switch_group_response);
+        EXPECT_TRUE(recorder.wait_until_parameter_result_count(5));
+
         const auto results = recorder.parameter_result_snapshot();
-        EXPECT_TRUE(results.size() == 4);
+        EXPECT_TRUE(results.size() == 5);
         EXPECT_TRUE(results[0].result.request_id == 2);
         EXPECT_TRUE(results[0].result.operation == IEC_PARAMETER_OPERATION_WRITE);
-        EXPECT_TRUE(results[0].result.result == IEC_PARAMETER_RESULT_ACCEPTED);
+        EXPECT_TRUE(results[0].result.write_mode == IEC_PARAMETER_WRITE_MODE_PRESET);
+        EXPECT_TRUE(results[0].result.result == IEC_PARAMETER_RESULT_PRESET_OK);
         EXPECT_TRUE(results[0].result.parameter_id == 10);
         EXPECT_TRUE(results[1].result.request_id == 3);
-        EXPECT_TRUE(results[1].result.operation == IEC_PARAMETER_OPERATION_VERIFY);
-        EXPECT_TRUE(results[1].result.result == IEC_PARAMETER_RESULT_VERIFY_OK);
+        EXPECT_TRUE(results[1].result.operation == IEC_PARAMETER_OPERATION_WRITE);
+        EXPECT_TRUE(results[1].result.write_mode == IEC_PARAMETER_WRITE_MODE_EXECUTE);
+        EXPECT_TRUE(results[1].result.result == IEC_PARAMETER_RESULT_EXECUTE_OK);
         EXPECT_TRUE(results[2].result.request_id == 4);
-        EXPECT_TRUE(results[2].result.operation == IEC_PARAMETER_OPERATION_SWITCH_GROUP);
-        EXPECT_TRUE(results[2].result.result == IEC_PARAMETER_RESULT_CURRENT_GROUP);
-        EXPECT_TRUE(results[2].result.setting_group == 2);
+        EXPECT_TRUE(results[2].result.operation == IEC_PARAMETER_OPERATION_WRITE);
+        EXPECT_TRUE(results[2].result.write_mode == IEC_PARAMETER_WRITE_MODE_CANCEL);
+        EXPECT_TRUE(results[2].result.result == IEC_PARAMETER_RESULT_CANCEL_OK);
         EXPECT_TRUE(results[3].result.request_id == 5);
         EXPECT_TRUE(results[3].result.operation == IEC_PARAMETER_OPERATION_SWITCH_GROUP);
-        EXPECT_TRUE(results[3].result.result == IEC_PARAMETER_RESULT_GROUP_SWITCHED);
-        EXPECT_TRUE(results[3].result.setting_group == 3);
+        EXPECT_TRUE(results[3].result.result == IEC_PARAMETER_RESULT_CURRENT_GROUP);
+        EXPECT_TRUE(results[3].result.setting_group == 2);
+        EXPECT_TRUE(results[4].result.request_id == 6);
+        EXPECT_TRUE(results[4].result.operation == IEC_PARAMETER_OPERATION_SWITCH_GROUP);
+        EXPECT_TRUE(results[4].result.result == IEC_PARAMETER_RESULT_GROUP_SWITCHED);
+        EXPECT_TRUE(results[4].result.setting_group == 3);
 
         EXPECT_STATUS(stop(session, 1000), IEC_STATUS_OK);
         EXPECT_STATUS(destroy(session), IEC_STATUS_OK);
@@ -2046,113 +2271,10 @@ template <
     typename DestroyFn,
     typename StartFn,
     typename StopFn,
-    typename GetDeviceDescriptionFn>
-void exercise_device_description(
-    const char *name,
-    const Config &protocol_config,
-    CreateFn create,
-    DestroyFn destroy,
-    StartFn start,
-    StopFn stop,
-    GetDeviceDescriptionFn get_device_description)
-{
-    StateRecorder recorder;
-    MockTransport mock;
-    auto common = make_common_config(recorder);
-    auto transport = make_transport(mock);
-    auto callbacks = make_callbacks();
-
-    iec_session_t *session = nullptr;
-    const iec_device_description_request_t request{
-        1,
-        IEC_DEVICE_DESCRIPTION_FORMAT_XML,
-        64,
-    };
-
-    const std::vector<uint8_t> expected_request{
-        210, 1, 5, 0, 1, 0, 0, 0, 0,
-        1, 0, 0, 0,
-        1,
-        64, 0, 0, 0,
-    };
-    const std::vector<uint8_t> response{
-        210, 1, 10, 0, 1, 0, 0, 0, 0,
-        1, 0, 0, 0,
-        1,
-        1,
-        4, 0, 0, 0,
-        '<', 'm', '/', '>',
-    };
-
-    uint32_t request_id = 99;
-    EXPECT_STATUS(get_device_description(nullptr, &request, &request_id), IEC_STATUS_INVALID_ARGUMENT);
-    EXPECT_TRUE(request_id == 0);
-    EXPECT_STATUS(create(&common, &protocol_config, &transport, &callbacks, &session), IEC_STATUS_OK);
-    EXPECT_TRUE(session != nullptr);
-
-    auto cleanup = [&] {
-        if (session != nullptr) {
-            (void)stop(session, 100);
-            (void)destroy(session);
-            session = nullptr;
-        }
-        close_transport(mock);
-    };
-
-    try {
-        auto invalid_format = request;
-        invalid_format.preferred_format = static_cast<iec_device_description_format_t>(99);
-        auto invalid_size = request;
-        invalid_size.max_content_size = 0;
-
-        EXPECT_STATUS(get_device_description(session, nullptr, &request_id), IEC_STATUS_INVALID_ARGUMENT);
-        EXPECT_STATUS(get_device_description(session, &request, nullptr), IEC_STATUS_INVALID_ARGUMENT);
-        EXPECT_STATUS(get_device_description(session, &invalid_format, &request_id), IEC_STATUS_INVALID_ARGUMENT);
-        EXPECT_STATUS(get_device_description(session, &invalid_size, &request_id), IEC_STATUS_INVALID_ARGUMENT);
-        EXPECT_STATUS(get_device_description(session, &request, &request_id), IEC_STATUS_BAD_STATE);
-        EXPECT_TRUE(request_id == 0);
-
-        EXPECT_STATUS(start(session), IEC_STATUS_OK);
-        EXPECT_TRUE(recorder.wait_until_contains(IEC_RUNTIME_RUNNING));
-
-        EXPECT_STATUS(get_device_description(session, &request, &request_id), IEC_STATUS_OK);
-        EXPECT_TRUE(request_id == 1);
-        EXPECT_TRUE(mock.last_sent == expected_request);
-
-        push_recv(mock, response);
-        EXPECT_TRUE(recorder.wait_until_device_description_count(1));
-        const auto descriptions = recorder.device_description_snapshot();
-        EXPECT_TRUE(descriptions.size() == 1);
-        EXPECT_TRUE(descriptions[0].description.request_id == 1);
-        EXPECT_TRUE(descriptions[0].description.common_address == 1);
-        EXPECT_TRUE(descriptions[0].description.format == IEC_DEVICE_DESCRIPTION_FORMAT_XML);
-        EXPECT_TRUE(descriptions[0].description.is_complete == 1);
-        EXPECT_TRUE(descriptions[0].description.content_size == 4);
-        EXPECT_TRUE(descriptions[0].content == std::vector<uint8_t>({'<', 'm', '/', '>'}));
-
-        EXPECT_STATUS(stop(session, 1000), IEC_STATUS_OK);
-        EXPECT_STATUS(destroy(session), IEC_STATUS_OK);
-        session = nullptr;
-        close_transport(mock);
-    } catch (...) {
-        cleanup();
-        throw;
-    }
-
-    std::printf("  %s device_description\n", name);
-}
-
-template <
-    typename Config,
-    typename CreateFn,
-    typename DestroyFn,
-    typename StartFn,
-    typename StopFn,
     typename ListFilesFn,
     typename ReadFileFn,
     typename WriteFileFn,
-    typename GetFileTransferStatusFn,
-    typename CancelFileTransferFn>
+    typename GetFileTransferStatusFn>
 void exercise_file_transfer(
     const char *name,
     const Config &protocol_config,
@@ -2163,8 +2285,7 @@ void exercise_file_transfer(
     ListFilesFn list_files,
     ReadFileFn read_file,
     WriteFileFn write_file,
-    GetFileTransferStatusFn get_file_transfer_status,
-    CancelFileTransferFn cancel_file_transfer)
+    GetFileTransferStatusFn get_file_transfer_status)
 {
     StateRecorder recorder;
     MockTransport mock;
@@ -2186,6 +2307,18 @@ void exercise_file_transfer(
         content,
         static_cast<uint32_t>(sizeof(content)),
         64,
+        1,
+    };
+    const uint8_t chunked_content[] = {1, 2, 3, 4, 5, 6};
+    const iec_file_write_request_t chunked_write_request{
+        1,
+        "/cfg",
+        "chunk.bin",
+        0,
+        static_cast<uint32_t>(sizeof(chunked_content)),
+        chunked_content,
+        static_cast<uint32_t>(sizeof(chunked_content)),
+        4,
         1,
     };
 
@@ -2212,10 +2345,28 @@ void exercise_file_transfer(
         4, 0, 0, 0,
         0xaa, 0xbb, 0xcc, 0xdd,
     };
-    const std::vector<uint8_t> expected_cancel_request{
-        209, 1, 6, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0,
+    const std::vector<uint8_t> expected_chunked_write_first{
+        208, 1, 6, 0, 1, 0, 0, 0, 0, 2, 0,
+        4, '/', 'c', 'f', 'g',
+        9, 'c', 'h', 'u', 'n', 'k', '.', 'b', 'i', 'n',
+        3, 0, 0, 0,
+        0, 0, 0, 0,
+        6, 0, 0, 0,
+        4, 0, 0, 0,
+        4, 0, 0, 0,
+        1, 2, 3, 4,
     };
-
+    const std::vector<uint8_t> expected_chunked_write_second{
+        208, 1, 6, 0, 1, 0, 0, 0, 0, 2, 0,
+        4, '/', 'c', 'f', 'g',
+        9, 'c', 'h', 'u', 'n', 'k', '.', 'b', 'i', 'n',
+        3, 0, 0, 0,
+        4, 0, 0, 0,
+        6, 0, 0, 0,
+        4, 0, 0, 0,
+        2, 0, 0, 0,
+        5, 6,
+    };
     const std::vector<uint8_t> list_response{
         206, 1, 10, 0, 1, 0, 0, 0, 0, 1, 2,
         4, '/', 'c', 'f', 'g',
@@ -2243,6 +2394,14 @@ void exercise_file_transfer(
         8, 0, 0, 0,
         16, 0, 0, 0,
     };
+    const std::vector<uint8_t> list_rejected_response{
+        206, 1, 0x47, 0, 1, 0, 0, 0, 0, 0, 0,
+        4, '/', 'c', 'f', 'g',
+    };
+    const std::vector<uint8_t> read_negative_response{
+        207, 1, 0x47, 0, 1, 0, 0, 0, 0, 0, 0,
+        4, 0, 0, 0,
+    };
 
     uint32_t request_id = 99;
     uint32_t transfer_id = 99;
@@ -2252,7 +2411,6 @@ void exercise_file_transfer(
     EXPECT_STATUS(read_file(nullptr, &read_request, &transfer_id), IEC_STATUS_INVALID_ARGUMENT);
     EXPECT_TRUE(transfer_id == 0);
     EXPECT_STATUS(get_file_transfer_status(nullptr, 1, &status), IEC_STATUS_INVALID_ARGUMENT);
-    EXPECT_STATUS(cancel_file_transfer(nullptr, 1), IEC_STATUS_INVALID_ARGUMENT);
     EXPECT_STATUS(create(&common, &protocol_config, &transport, &callbacks, &session), IEC_STATUS_OK);
     EXPECT_TRUE(session != nullptr);
 
@@ -2278,7 +2436,6 @@ void exercise_file_transfer(
         EXPECT_STATUS(read_file(session, &invalid_read, &transfer_id), IEC_STATUS_INVALID_ARGUMENT);
         EXPECT_STATUS(write_file(session, &invalid_write, &transfer_id), IEC_STATUS_INVALID_ARGUMENT);
         EXPECT_STATUS(get_file_transfer_status(session, 0, &status), IEC_STATUS_INVALID_ARGUMENT);
-        EXPECT_STATUS(cancel_file_transfer(session, 0), IEC_STATUS_INVALID_ARGUMENT);
         EXPECT_STATUS(list_files(session, &list_request, &request_id), IEC_STATUS_BAD_STATE);
         EXPECT_TRUE(request_id == 0);
 
@@ -2334,20 +2491,34 @@ void exercise_file_transfer(
         EXPECT_TRUE(status.state == IEC_FILE_TRANSFER_STATE_COMPLETED);
         EXPECT_TRUE(status.acknowledged_offset == 8);
 
-        const iec_file_read_request_t cancel_read{1, "/cfg", "cancel.bin", 0, 64, 32};
-        EXPECT_STATUS(read_file(session, &cancel_read, &transfer_id), IEC_STATUS_OK);
+        EXPECT_STATUS(write_file(session, &chunked_write_request, &transfer_id), IEC_STATUS_OK);
         EXPECT_TRUE(transfer_id == 3);
-        EXPECT_STATUS(cancel_file_transfer(session, transfer_id), IEC_STATUS_OK);
-        auto expected_cancel_for_third = expected_cancel_request;
-        expected_cancel_for_third[11] = 3;
-        EXPECT_TRUE(mock.last_sent == expected_cancel_for_third);
-        EXPECT_TRUE(recorder.wait_until_file_result_count(4));
+        EXPECT_TRUE(wait_until_sent_count(mock, 5));
+        auto sent = sent_history_snapshot(mock);
+        EXPECT_TRUE(sent.size() >= 5);
+        EXPECT_TRUE(sent[3] == expected_chunked_write_first);
+        EXPECT_TRUE(sent[4] == expected_chunked_write_second);
         EXPECT_STATUS(get_file_transfer_status(session, transfer_id, &status), IEC_STATUS_OK);
-        EXPECT_TRUE(status.state == IEC_FILE_TRANSFER_STATE_CANCELED);
-        EXPECT_TRUE(status.last_result == IEC_FILE_RESULT_CANCELED);
+        EXPECT_TRUE(status.direction == IEC_FILE_TRANSFER_DIRECTION_WRITE);
+        EXPECT_TRUE(status.state == IEC_FILE_TRANSFER_STATE_ACCEPTED);
+        EXPECT_TRUE(status.acknowledged_offset == 0);
+
+        EXPECT_STATUS(list_files(session, &list_request, &request_id), IEC_STATUS_OK);
+        EXPECT_TRUE(request_id == 2);
+        push_recv(mock, list_rejected_response);
+        EXPECT_TRUE(recorder.wait_until_file_result_count(4));
+
+        EXPECT_STATUS(read_file(session, &read_request, &transfer_id), IEC_STATUS_OK);
+        EXPECT_TRUE(transfer_id == 4);
+        push_recv(mock, read_negative_response);
+        EXPECT_TRUE(recorder.wait_until_file_result_count(5));
+        EXPECT_STATUS(get_file_transfer_status(session, transfer_id, &status), IEC_STATUS_OK);
+        EXPECT_TRUE(status.state == IEC_FILE_TRANSFER_STATE_FAILED);
+        EXPECT_TRUE(status.is_resumable == 0);
+        EXPECT_TRUE(status.last_result == IEC_FILE_RESULT_NEGATIVE_CONFIRM);
 
         const auto results = recorder.file_result_snapshot();
-        EXPECT_TRUE(results.size() == 4);
+        EXPECT_TRUE(results.size() == 5);
         EXPECT_TRUE(results[0].result.request_id == 1);
         EXPECT_TRUE(results[0].result.operation == IEC_FILE_OPERATION_LIST);
         EXPECT_TRUE(results[0].result.result == IEC_FILE_RESULT_COMPLETED);
@@ -2357,9 +2528,16 @@ void exercise_file_transfer(
         EXPECT_TRUE(results[2].result.transfer_id == 2);
         EXPECT_TRUE(results[2].result.operation == IEC_FILE_OPERATION_WRITE);
         EXPECT_TRUE(results[2].result.result == IEC_FILE_RESULT_COMPLETED);
-        EXPECT_TRUE(results[3].result.transfer_id == 3);
-        EXPECT_TRUE(results[3].result.operation == IEC_FILE_OPERATION_CANCEL);
-        EXPECT_TRUE(results[3].result.result == IEC_FILE_RESULT_CANCELED);
+        EXPECT_TRUE(results[3].result.request_id == 2);
+        EXPECT_TRUE(results[3].result.operation == IEC_FILE_OPERATION_LIST);
+        EXPECT_TRUE(results[3].result.result == IEC_FILE_RESULT_NEGATIVE_CONFIRM);
+        EXPECT_TRUE(results[3].result.is_final == 1);
+        EXPECT_TRUE(results[3].detail_message == "file operation negative confirmation");
+        EXPECT_TRUE(results[4].result.transfer_id == 4);
+        EXPECT_TRUE(results[4].result.operation == IEC_FILE_OPERATION_READ);
+        EXPECT_TRUE(results[4].result.result == IEC_FILE_RESULT_NEGATIVE_CONFIRM);
+        EXPECT_TRUE(results[4].result.is_final == 1);
+        EXPECT_TRUE(results[4].detail_message == "file operation negative confirmation");
 
         EXPECT_STATUS(stop(session, 1000), IEC_STATUS_OK);
         EXPECT_STATUS(destroy(session), IEC_STATUS_OK);
@@ -2373,40 +2551,13 @@ void exercise_file_transfer(
     std::printf("  %s file_transfer\n", name);
 }
 
-struct FirmwareImage {
-    std::vector<uint8_t> data;
-};
-
-int GW_PROTOCOL_CALL read_upgrade_chunk(
-    void *ctx,
-    uint32_t offset,
-    uint8_t *buffer,
-    uint32_t capacity,
-    uint32_t *out_len)
-{
-    auto *image = static_cast<FirmwareImage *>(ctx);
-    if (image == nullptr || out_len == nullptr || (capacity > 0 && buffer == nullptr)) {
-        return -1;
-    }
-    if (offset >= image->data.size()) {
-        *out_len = 0;
-        return 0;
-    }
-    const uint32_t remaining = static_cast<uint32_t>(image->data.size() - offset);
-    const uint32_t count = std::min<uint32_t>(remaining, capacity);
-    std::copy(image->data.begin() + offset, image->data.begin() + offset + count, buffer);
-    *out_len = count;
-    return 0;
-}
-
 template <
     typename Config,
     typename CreateFn,
     typename DestroyFn,
     typename StartFn,
     typename StopFn,
-    typename UpgradeFn,
-    typename CancelUpgradeFn>
+    typename UpgradeControlFn>
 void exercise_upgrade(
     const char *name,
     const Config &protocol_config,
@@ -2414,8 +2565,7 @@ void exercise_upgrade(
     DestroyFn destroy,
     StartFn start,
     StopFn stop,
-    UpgradeFn upgrade_firmware,
-    CancelUpgradeFn cancel_upgrade)
+    UpgradeControlFn upgrade_control)
 {
     StateRecorder recorder;
     MockTransport mock;
@@ -2424,109 +2574,43 @@ void exercise_upgrade(
     transport.max_plain_frame_len = 512;
     auto callbacks = make_callbacks();
 
-    FirmwareImage image{{0x10, 0x20, 0x30, 0x40, 0x50, 0x60}};
-    iec_upgrade_request_t request{};
-    request.common_address = 1;
-    request.remote_directory = "/upgrade";
-    request.remote_file_name = "fw.bin";
-    request.image.ctx = &image;
-    request.image.total_size = static_cast<uint32_t>(image.data.size());
-    request.image.read = read_upgrade_chunk;
-    request.preferred_chunk_size = 4;
-    request.checksum_text = "md5";
-    request.overwrite_existing = 1;
-    request.command_timeout_ms = 1000;
-    request.transfer_timeout_ms = 1000;
+    iec_upgrade_control_request_t start_request{};
+    start_request.common_address = 1;
+    start_request.information_object_address = 0;
+    start_request.operation = IEC_UPGRADE_OPERATION_START;
+    start_request.command_timeout_ms = 1000;
+
+    iec_upgrade_control_request_t finish_request = start_request;
+    finish_request.operation = IEC_UPGRADE_OPERATION_FINISH;
+
+    iec_upgrade_control_request_t cancel_request = start_request;
+    cancel_request.operation = IEC_UPGRADE_OPERATION_CANCEL;
 
     const std::vector<uint8_t> expected_start{
         211, 1, 6, 0, 1, 0, 0, 0, 0, 1,
-        1, 0, 0, 0,
-        6, 0, 0, 0,
-        8, '/', 'u', 'p', 'g', 'r', 'a', 'd', 'e',
-        6, 'f', 'w', '.', 'b', 'i', 'n',
-        3, 'm', 'd', '5',
-    };
-    const std::vector<uint8_t> expected_start_cancel{
-        211, 1, 6, 0, 1, 0, 0, 0, 0, 1,
-        2, 0, 0, 0,
-        6, 0, 0, 0,
-        8, '/', 'u', 'p', 'g', 'r', 'a', 'd', 'e',
-        6, 'f', 'w', '.', 'b', 'i', 'n',
-        3, 'm', 'd', '5',
     };
     const std::vector<uint8_t> start_confirm{
         211, 1, 7, 0, 1, 0, 0, 0, 0, 1,
-        1, 0, 0, 0,
     };
-    const std::vector<uint8_t> expected_execute{
-        211, 1, 6, 0, 1, 0, 0, 0, 0, 2,
-        1, 0, 0, 0,
-        1, 0, 0, 0,
-    };
-    const std::vector<uint8_t> execute_confirm{
-        211, 1, 7, 0, 1, 0, 0, 0, 0, 2,
-        1, 0, 0, 0,
-        1, 0, 0, 0,
-    };
-    const std::vector<uint8_t> expected_write{
-        208, 1, 6, 0, 1, 0, 0, 0, 0, 2, 0,
-        8, '/', 'u', 'p', 'g', 'r', 'a', 'd', 'e',
-        6, 'f', 'w', '.', 'b', 'i', 'n',
-        1, 0, 0, 0,
-        0, 0, 0, 0,
-        6, 0, 0, 0,
-        4, 0, 0, 0,
-        4, 0, 0, 0,
-        0x10, 0x20, 0x30, 0x40,
-    };
-    const std::vector<uint8_t> expected_write_second{
-        208, 1, 6, 0, 1, 0, 0, 0, 0, 0, 0,
-        8, '/', 'u', 'p', 'g', 'r', 'a', 'd', 'e',
-        6, 'f', 'w', '.', 'b', 'i', 'n',
-        1, 0, 0, 0,
-        4, 0, 0, 0,
-        6, 0, 0, 0,
-        4, 0, 0, 0,
-        2, 0, 0, 0,
-        0x50, 0x60,
-    };
-    const std::vector<uint8_t> write_response{
-        208, 1, 10, 0, 1, 0, 0, 0, 0, 1, 2,
-        1, 0, 0, 0,
-        4, 0, 0, 0,
-        6, 0, 0, 0,
-    };
-    const std::vector<uint8_t> write_response_final{
-        208, 1, 10, 0, 1, 0, 0, 0, 0, 1, 2,
-        1, 0, 0, 0,
-        6, 0, 0, 0,
-        4, 0, 0, 0,
+    const std::vector<uint8_t> start_wrong_cause{
+        211, 1, 9, 0, 1, 0, 0, 0, 0, 1,
     };
     const std::vector<uint8_t> expected_finish{
-        211, 1, 6, 0, 1, 0, 0, 0, 0, 3,
-        1, 0, 0, 0,
-        1, 0, 0, 0,
+        211, 1, 6, 0, 1, 0, 0, 0, 0, 0,
     };
     const std::vector<uint8_t> finish_confirm{
-        211, 1, 7, 0, 1, 0, 0, 0, 0, 3,
-        1, 0, 0, 0,
-        1, 0, 0, 0,
+        211, 1, 7, 0, 1, 0, 0, 0, 0, 0,
     };
     const std::vector<uint8_t> expected_cancel{
-        211, 1, 6, 0, 1, 0, 0, 0, 0, 4,
-        2, 0, 0, 0,
-        2, 0, 0, 0,
+        211, 1, 8, 0, 1, 0, 0, 0, 0, 0,
     };
     const std::vector<uint8_t> cancel_confirm{
-        211, 1, 7, 0, 1, 0, 0, 0, 0, 4,
-        2, 0, 0, 0,
-        2, 0, 0, 0,
+        211, 1, 9, 0, 1, 0, 0, 0, 0, 0,
     };
 
-    uint32_t upgrade_id = 99;
-    EXPECT_STATUS(upgrade_firmware(nullptr, &request, &upgrade_id), IEC_STATUS_INVALID_ARGUMENT);
-    EXPECT_TRUE(upgrade_id == 0);
-    EXPECT_STATUS(cancel_upgrade(nullptr, 1), IEC_STATUS_INVALID_ARGUMENT);
+    uint32_t request_id = 99;
+    EXPECT_STATUS(upgrade_control(nullptr, &start_request, &request_id), IEC_STATUS_INVALID_ARGUMENT);
+    EXPECT_TRUE(request_id == 0);
 
     iec_session_t *session = nullptr;
     EXPECT_STATUS(create(&common, &protocol_config, &transport, &callbacks, &session), IEC_STATUS_OK);
@@ -2542,75 +2626,69 @@ void exercise_upgrade(
     };
 
     try {
-        auto invalid_request = request;
-        invalid_request.remote_file_name = "";
-        EXPECT_STATUS(upgrade_firmware(session, nullptr, &upgrade_id), IEC_STATUS_INVALID_ARGUMENT);
-        EXPECT_STATUS(upgrade_firmware(session, &invalid_request, &upgrade_id), IEC_STATUS_INVALID_ARGUMENT);
-        EXPECT_STATUS(upgrade_firmware(session, &request, &upgrade_id), IEC_STATUS_BAD_STATE);
-        EXPECT_TRUE(upgrade_id == 0);
-        EXPECT_STATUS(cancel_upgrade(session, 1), IEC_STATUS_BAD_STATE);
+        auto invalid_request = start_request;
+        invalid_request.operation = static_cast<iec_upgrade_operation_t>(99);
+        EXPECT_STATUS(upgrade_control(session, nullptr, &request_id), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(upgrade_control(session, &start_request, nullptr), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(upgrade_control(session, &invalid_request, &request_id), IEC_STATUS_INVALID_ARGUMENT);
+        EXPECT_STATUS(upgrade_control(session, &start_request, &request_id), IEC_STATUS_BAD_STATE);
+        EXPECT_TRUE(request_id == 0);
 
         EXPECT_STATUS(start(session), IEC_STATUS_OK);
         EXPECT_TRUE(recorder.wait_until_contains(IEC_RUNTIME_RUNNING));
 
-        EXPECT_STATUS(upgrade_firmware(session, &request, &upgrade_id), IEC_STATUS_OK);
-        EXPECT_TRUE(upgrade_id == 1);
+        EXPECT_STATUS(upgrade_control(session, &start_request, &request_id), IEC_STATUS_OK);
+        EXPECT_TRUE(request_id == 1);
         EXPECT_TRUE(wait_until_sent_count(mock, 1));
         auto sent = sent_history_snapshot(mock);
         EXPECT_TRUE(sent.size() == 1);
         EXPECT_TRUE(sent[0] == expected_start);
-        const auto progress = recorder.upgrade_progress_snapshot();
-        EXPECT_TRUE(progress.size() >= 2);
-        EXPECT_TRUE(progress[0].progress.upgrade_id == 1);
-        EXPECT_TRUE(progress[0].progress.stage == IEC_UPGRADE_STAGE_STARTING);
-        EXPECT_TRUE(progress[1].progress.stage == IEC_UPGRADE_STAGE_WAIT_START_CONFIRM);
+        EXPECT_STATUS(upgrade_control(session, &finish_request, &request_id), IEC_STATUS_BUSY);
 
         push_recv(mock, start_confirm);
+        EXPECT_TRUE(recorder.wait_until_upgrade_result_count(1));
+
+        EXPECT_STATUS(upgrade_control(session, &finish_request, &request_id), IEC_STATUS_OK);
+        EXPECT_TRUE(request_id == 2);
         EXPECT_TRUE(wait_until_sent_count(mock, 2));
         sent = sent_history_snapshot(mock);
-        EXPECT_TRUE(sent[1] == expected_execute);
-        EXPECT_TRUE(recorder.wait_until_upgrade_progress_count(3));
-        EXPECT_TRUE(recorder.upgrade_progress_snapshot()[2].progress.stage == IEC_UPGRADE_STAGE_EXECUTING);
+        EXPECT_TRUE(sent[1] == expected_finish);
+        push_recv(mock, finish_confirm);
+        EXPECT_TRUE(recorder.wait_until_upgrade_result_count(2));
 
-        push_recv(mock, execute_confirm);
+        EXPECT_STATUS(upgrade_control(session, &cancel_request, &request_id), IEC_STATUS_OK);
+        EXPECT_TRUE(request_id == 3);
         EXPECT_TRUE(wait_until_sent_count(mock, 3));
         sent = sent_history_snapshot(mock);
-        EXPECT_TRUE(sent[2] == expected_write);
-        EXPECT_TRUE(last_sent_snapshot(mock) == expected_write);
+        EXPECT_TRUE(sent[2] == expected_cancel);
+        push_recv(mock, cancel_confirm);
+        EXPECT_TRUE(recorder.wait_until_upgrade_result_count(3));
 
-        push_recv(mock, write_response);
+        EXPECT_STATUS(upgrade_control(session, &start_request, &request_id), IEC_STATUS_OK);
+        EXPECT_TRUE(request_id == 4);
         EXPECT_TRUE(wait_until_sent_count(mock, 4));
         sent = sent_history_snapshot(mock);
-        EXPECT_TRUE(sent[3] == expected_write_second);
-        push_recv(mock, write_response_final);
-        EXPECT_TRUE(wait_until_sent_count(mock, 5));
-        sent = sent_history_snapshot(mock);
-        EXPECT_TRUE(sent[4] == expected_finish);
-        push_recv(mock, finish_confirm);
-        EXPECT_TRUE(recorder.wait_until_upgrade_result_count(1));
-        const auto results = recorder.upgrade_result_snapshot();
-        EXPECT_TRUE(results.size() == 1);
-        EXPECT_TRUE(results[0].result.upgrade_id == 1);
-        EXPECT_TRUE(results[0].result.result == IEC_UPGRADE_RESULT_COMPLETED);
-        EXPECT_TRUE(results[0].result.final_stage == IEC_UPGRADE_STAGE_COMPLETED);
-        EXPECT_TRUE(results[0].result.bytes_transferred == 6);
-        const auto after_complete = recorder.upgrade_progress_snapshot();
-        EXPECT_TRUE(after_complete.back().progress.stage == IEC_UPGRADE_STAGE_COMPLETED);
-        EXPECT_TRUE(after_complete.back().progress.percent == 100);
+        EXPECT_TRUE(sent[3] == expected_start);
+        push_recv(mock, start_wrong_cause);
+        EXPECT_TRUE(recorder.wait_until_upgrade_result_count(4));
 
-        EXPECT_STATUS(upgrade_firmware(session, &request, &upgrade_id), IEC_STATUS_OK);
-        EXPECT_TRUE(upgrade_id == 2);
-        EXPECT_TRUE(wait_until_sent_count(mock, 6));
-        sent = sent_history_snapshot(mock);
-        EXPECT_TRUE(sent[5] == expected_start_cancel);
-        EXPECT_STATUS(cancel_upgrade(session, upgrade_id), IEC_STATUS_OK);
-        EXPECT_TRUE(wait_until_sent_count(mock, 7));
-        EXPECT_TRUE(last_sent_snapshot(mock) == expected_cancel);
-        push_recv(mock, cancel_confirm);
-        EXPECT_TRUE(recorder.wait_until_upgrade_result_count(2));
-        const auto cancel_results = recorder.upgrade_result_snapshot();
-        EXPECT_TRUE(cancel_results[1].result.upgrade_id == 2);
-        EXPECT_TRUE(cancel_results[1].result.result == IEC_UPGRADE_RESULT_CANCELED);
+        const auto results = recorder.upgrade_result_snapshot();
+        EXPECT_TRUE(results.size() == 4);
+        EXPECT_TRUE(results[0].result.request_id == 1);
+        EXPECT_TRUE(results[0].result.operation == IEC_UPGRADE_OPERATION_START);
+        EXPECT_TRUE(results[0].result.result == IEC_UPGRADE_RESULT_ACCEPTED);
+        EXPECT_TRUE(results[0].result.information_object_address == 0);
+        EXPECT_TRUE(results[0].result.is_final == 1);
+        EXPECT_TRUE(results[1].result.request_id == 2);
+        EXPECT_TRUE(results[1].result.operation == IEC_UPGRADE_OPERATION_FINISH);
+        EXPECT_TRUE(results[1].result.result == IEC_UPGRADE_RESULT_ACCEPTED);
+        EXPECT_TRUE(results[2].result.request_id == 3);
+        EXPECT_TRUE(results[2].result.operation == IEC_UPGRADE_OPERATION_CANCEL);
+        EXPECT_TRUE(results[2].result.result == IEC_UPGRADE_RESULT_CANCELED);
+        EXPECT_TRUE(results[3].result.request_id == 4);
+        EXPECT_TRUE(results[3].result.operation == IEC_UPGRADE_OPERATION_START);
+        EXPECT_TRUE(results[3].result.result == IEC_UPGRADE_RESULT_PROTOCOL_ERROR);
+        EXPECT_TRUE(results[3].detail_message == "unexpected upgrade control cause");
 
         EXPECT_STATUS(stop(session, 1000), IEC_STATUS_OK);
         EXPECT_STATUS(destroy(session), IEC_STATUS_OK);
@@ -2815,32 +2893,8 @@ void test_iec101_parameters()
         [](iec_session_t *session, const iec_parameter_write_request_t *request, uint32_t *out_request_id) {
             return iec101_write_parameters(session, request, out_request_id);
         },
-        [](iec_session_t *session, const iec_parameter_verify_request_t *request, uint32_t *out_request_id) {
-            return iec101_verify_parameters(session, request, out_request_id);
-        },
         [](iec_session_t *session, const iec_setting_group_request_t *request, uint32_t *out_request_id) {
             return iec101_switch_setting_group(session, request, out_request_id);
-        });
-}
-
-void test_iec101_device_description()
-{
-    const auto valid = make_iec101_config();
-    exercise_device_description(
-        "iec101",
-        valid,
-        [](const iec_session_config_t *common,
-           const iec101_master_config_t *config,
-           const iec_transport_t *transport,
-           const iec_callbacks_t *callbacks,
-           iec_session_t **out_session) {
-            return iec101_create(common, config, transport, callbacks, out_session);
-        },
-        [](iec_session_t *session) { return iec101_destroy(session); },
-        [](iec_session_t *session) { return iec101_start(session); },
-        [](iec_session_t *session, uint32_t timeout_ms) { return iec101_stop(session, timeout_ms); },
-        [](iec_session_t *session, const iec_device_description_request_t *request, uint32_t *out_request_id) {
-            return iec101_get_device_description(session, request, out_request_id);
         });
 }
 
@@ -2871,9 +2925,6 @@ void test_iec101_file_transfer()
         },
         [](const iec_session_t *session, uint32_t transfer_id, iec_file_transfer_status_t *out_status) {
             return iec101_get_file_transfer_status(session, transfer_id, out_status);
-        },
-        [](iec_session_t *session, uint32_t transfer_id) {
-            return iec101_cancel_file_transfer(session, transfer_id);
         });
 }
 
@@ -2893,11 +2944,8 @@ void test_iec101_upgrade()
         [](iec_session_t *session) { return iec101_destroy(session); },
         [](iec_session_t *session) { return iec101_start(session); },
         [](iec_session_t *session, uint32_t timeout_ms) { return iec101_stop(session, timeout_ms); },
-        [](iec_session_t *session, const iec_upgrade_request_t *request, uint32_t *out_upgrade_id) {
-            return iec101_upgrade_firmware(session, request, out_upgrade_id);
-        },
-        [](iec_session_t *session, uint32_t upgrade_id) {
-            return iec101_cancel_upgrade(session, upgrade_id);
+        [](iec_session_t *session, const iec_upgrade_control_request_t *request, uint32_t *out_request_id) {
+            return iec101_upgrade_control(session, request, out_request_id);
         });
 }
 
@@ -3092,32 +3140,8 @@ void test_m101_parameters()
         [](iec_session_t *session, const iec_parameter_write_request_t *request, uint32_t *out_request_id) {
             return m101_write_parameters(session, request, out_request_id);
         },
-        [](iec_session_t *session, const iec_parameter_verify_request_t *request, uint32_t *out_request_id) {
-            return m101_verify_parameters(session, request, out_request_id);
-        },
         [](iec_session_t *session, const iec_setting_group_request_t *request, uint32_t *out_request_id) {
             return m101_switch_setting_group(session, request, out_request_id);
-        });
-}
-
-void test_m101_device_description()
-{
-    const auto valid = make_m101_config();
-    exercise_device_description(
-        "m101",
-        valid,
-        [](const iec_session_config_t *common,
-           const m101_master_config_t *config,
-           const iec_transport_t *transport,
-           const iec_callbacks_t *callbacks,
-           iec_session_t **out_session) {
-            return m101_create(common, config, transport, callbacks, out_session);
-        },
-        [](iec_session_t *session) { return m101_destroy(session); },
-        [](iec_session_t *session) { return m101_start(session); },
-        [](iec_session_t *session, uint32_t timeout_ms) { return m101_stop(session, timeout_ms); },
-        [](iec_session_t *session, const iec_device_description_request_t *request, uint32_t *out_request_id) {
-            return m101_get_device_description(session, request, out_request_id);
         });
 }
 
@@ -3148,10 +3172,62 @@ void test_m101_file_transfer()
         },
         [](const iec_session_t *session, uint32_t transfer_id, iec_file_transfer_status_t *out_status) {
             return m101_get_file_transfer_status(session, transfer_id, out_status);
-        },
-        [](iec_session_t *session, uint32_t transfer_id) {
-            return m101_cancel_file_transfer(session, transfer_id);
         });
+}
+
+void test_m101_file_read_window()
+{
+    StateRecorder recorder;
+    MockTransport mock;
+    auto common = make_common_config(recorder);
+    auto transport = make_transport(mock);
+    transport.max_plain_frame_len = 64;
+    auto callbacks = make_callbacks();
+    auto config = make_m101_config();
+
+    const iec_file_read_request_t request{1, "/cfg", "terminal.xml", 0, 1024, 0};
+    const std::vector<uint8_t> expected_read_request{
+        207, 1, 6, 0, 1, 0, 0, 0, 0, 0, 0,
+        4, '/', 'c', 'f', 'g',
+        12, 't', 'e', 'r', 'm', 'i', 'n', 'a', 'l', '.', 'x', 'm', 'l',
+        1, 0, 0, 0,
+        0, 0, 0, 0,
+        33, 0, 0, 0,
+        0, 0, 0, 0,
+    };
+
+    iec_session_t *session = nullptr;
+    EXPECT_STATUS(m101_create(&common, &config, &transport, &callbacks, &session), IEC_STATUS_OK);
+    EXPECT_TRUE(session != nullptr);
+
+    auto cleanup = [&] {
+        if (session != nullptr) {
+            (void)m101_stop(session, 100);
+            (void)m101_destroy(session);
+            session = nullptr;
+        }
+        close_transport(mock);
+    };
+
+    try {
+        EXPECT_STATUS(m101_start(session), IEC_STATUS_OK);
+        EXPECT_TRUE(recorder.wait_until_contains(IEC_RUNTIME_RUNNING));
+
+        uint32_t transfer_id = 0;
+        EXPECT_STATUS(m101_read_file(session, &request, &transfer_id), IEC_STATUS_OK);
+        EXPECT_TRUE(transfer_id == 1);
+        EXPECT_TRUE(mock.last_sent == expected_read_request);
+
+        EXPECT_STATUS(m101_stop(session, 1000), IEC_STATUS_OK);
+        EXPECT_STATUS(m101_destroy(session), IEC_STATUS_OK);
+        session = nullptr;
+        close_transport(mock);
+    } catch (...) {
+        cleanup();
+        throw;
+    }
+
+    std::printf("  m101 file_read_window\n");
 }
 
 void test_m101_upgrade()
@@ -3170,12 +3246,154 @@ void test_m101_upgrade()
         [](iec_session_t *session) { return m101_destroy(session); },
         [](iec_session_t *session) { return m101_start(session); },
         [](iec_session_t *session, uint32_t timeout_ms) { return m101_stop(session, timeout_ms); },
-        [](iec_session_t *session, const iec_upgrade_request_t *request, uint32_t *out_upgrade_id) {
-            return m101_upgrade_firmware(session, request, out_upgrade_id);
-        },
-        [](iec_session_t *session, uint32_t upgrade_id) {
-            return m101_cancel_upgrade(session, upgrade_id);
+        [](iec_session_t *session, const iec_upgrade_control_request_t *request, uint32_t *out_request_id) {
+            return m101_upgrade_control(session, request, out_request_id);
         });
+}
+
+void test_m101_pending_timeouts()
+{
+    StateRecorder recorder;
+    MockTransport mock;
+    auto common = make_common_config(recorder);
+    common.command_timeout_ms = 80;
+    auto transport = make_transport(mock);
+    transport.max_plain_frame_len = 512;
+    auto callbacks = make_callbacks();
+    auto config = make_m101_config();
+
+    iec_session_t *session = nullptr;
+    EXPECT_STATUS(m101_create(&common, &config, &transport, &callbacks, &session), IEC_STATUS_OK);
+    EXPECT_TRUE(session != nullptr);
+
+    auto cleanup = [&] {
+        if (session != nullptr) {
+            (void)m101_stop(session, 100);
+            (void)m101_destroy(session);
+            session = nullptr;
+        }
+        close_transport(mock);
+    };
+
+    try {
+        EXPECT_STATUS(m101_start(session), IEC_STATUS_OK);
+        EXPECT_TRUE(recorder.wait_until_contains(IEC_RUNTIME_RUNNING));
+
+        iec_command_request_t command{};
+        command.address.common_address = 1;
+        command.address.information_object_address = 0x4001;
+        command.command_type = IEC_COMMAND_DOUBLE;
+        command.semantic = IEC_COMMAND_SEMANTIC_GENERAL;
+        command.mode = IEC_COMMAND_MODE_SELECT;
+        command.qualifier = 0;
+        command.value.doubled = 2;
+        uint32_t command_id = 0;
+        EXPECT_STATUS(m101_control_point(session, &command, &command_id), IEC_STATUS_OK);
+        EXPECT_TRUE(command_id == 1);
+        {
+            std::unique_lock<std::mutex> lock(recorder.mutex);
+            EXPECT_TRUE(!recorder.cv.wait_for(lock, std::chrono::milliseconds(30), [&] {
+                return !recorder.command_events.empty();
+            }));
+        }
+        EXPECT_TRUE(recorder.wait_until_command_count(1));
+
+        iec_clock_sync_request_t clock{};
+        clock.common_address = 1;
+        clock.timestamp.msec = 1;
+        clock.timestamp.minute = 1;
+        clock.timestamp.hour = 1;
+        clock.timestamp.day = 1;
+        clock.timestamp.month = 1;
+        clock.timestamp.year = 26;
+        uint32_t request_id = 0;
+        EXPECT_STATUS(m101_clock_sync(session, &clock, &request_id), IEC_STATUS_OK);
+        EXPECT_TRUE(request_id == 1);
+        {
+            std::unique_lock<std::mutex> lock(recorder.mutex);
+            EXPECT_TRUE(!recorder.cv.wait_for(lock, std::chrono::milliseconds(30), [&] {
+                return !recorder.clock_events.empty();
+            }));
+        }
+        EXPECT_TRUE(recorder.wait_until_clock_count(1));
+
+        iec_parameter_item_t item{};
+        item.parameter_id = 1;
+        item.address = 0x1000;
+        item.scope = IEC_PARAMETER_SCOPE_RUNNING;
+        item.value_type = IEC_PARAMETER_VALUE_UINT;
+        item.value.uint_value = 7;
+        iec_parameter_write_request_t parameter{};
+        parameter.common_address = 1;
+        parameter.setting_group = 1;
+        parameter.mode = IEC_PARAMETER_WRITE_MODE_PRESET;
+        parameter.items = &item;
+        parameter.item_count = 1;
+        EXPECT_STATUS(m101_write_parameters(session, &parameter, &request_id), IEC_STATUS_OK);
+        EXPECT_TRUE(request_id == 2);
+        {
+            std::unique_lock<std::mutex> lock(recorder.mutex);
+            EXPECT_TRUE(!recorder.cv.wait_for(lock, std::chrono::milliseconds(30), [&] {
+                return !recorder.parameter_results.empty();
+            }));
+        }
+        EXPECT_TRUE(recorder.wait_until_parameter_result_count(1));
+
+        const iec_file_list_request_t list{1, "/cfg", 0};
+        EXPECT_STATUS(m101_list_files(session, &list, &request_id), IEC_STATUS_OK);
+        EXPECT_TRUE(request_id == 3);
+        EXPECT_TRUE(recorder.wait_until_file_result_count(1));
+
+        const iec_file_read_request_t read{1, "/cfg", "timeout.bin", 0, 64, 0};
+        uint32_t transfer_id = 0;
+        EXPECT_STATUS(m101_read_file(session, &read, &transfer_id), IEC_STATUS_OK);
+        EXPECT_TRUE(transfer_id == 1);
+        EXPECT_TRUE(recorder.wait_until_file_result_count(2));
+
+        iec_upgrade_control_request_t upgrade{};
+        upgrade.common_address = 1;
+        upgrade.operation = IEC_UPGRADE_OPERATION_START;
+        upgrade.command_timeout_ms = 80;
+        EXPECT_STATUS(m101_upgrade_control(session, &upgrade, &request_id), IEC_STATUS_OK);
+        EXPECT_TRUE(request_id == 4);
+        EXPECT_TRUE(recorder.wait_until_upgrade_result_count(1));
+
+        const auto commands = recorder.command_snapshot();
+        EXPECT_TRUE(commands[0].result.result == IEC_COMMAND_RESULT_TIMEOUT);
+        EXPECT_TRUE(commands[0].result.is_final == 1);
+
+        const auto clocks = recorder.clock_snapshot();
+        EXPECT_TRUE(clocks[0].result.result == IEC_CLOCK_RESULT_TIMEOUT);
+        EXPECT_TRUE(clocks[0].result.operation == IEC_CLOCK_OPERATION_SYNC);
+
+        const auto parameters = recorder.parameter_result_snapshot();
+        EXPECT_TRUE(parameters[0].result.result == IEC_PARAMETER_RESULT_TIMEOUT);
+        EXPECT_TRUE(parameters[0].result.write_mode == IEC_PARAMETER_WRITE_MODE_PRESET);
+
+        const auto files = recorder.file_result_snapshot();
+        EXPECT_TRUE(files[0].result.operation == IEC_FILE_OPERATION_LIST);
+        EXPECT_TRUE(files[0].result.result == IEC_FILE_RESULT_TIMEOUT);
+        EXPECT_TRUE(files[1].result.operation == IEC_FILE_OPERATION_READ);
+        EXPECT_TRUE(files[1].result.result == IEC_FILE_RESULT_TIMEOUT);
+        iec_file_transfer_status_t status{};
+        EXPECT_STATUS(m101_get_file_transfer_status(session, transfer_id, &status), IEC_STATUS_OK);
+        EXPECT_TRUE(status.state == IEC_FILE_TRANSFER_STATE_FAILED);
+        EXPECT_TRUE(status.last_result == IEC_FILE_RESULT_TIMEOUT);
+
+        const auto upgrades = recorder.upgrade_result_snapshot();
+        EXPECT_TRUE(upgrades[0].result.result == IEC_UPGRADE_RESULT_TIMEOUT);
+        EXPECT_TRUE(upgrades[0].result.operation == IEC_UPGRADE_OPERATION_START);
+
+        EXPECT_STATUS(m101_stop(session, 1000), IEC_STATUS_OK);
+        EXPECT_STATUS(m101_destroy(session), IEC_STATUS_OK);
+        session = nullptr;
+        close_transport(mock);
+    } catch (...) {
+        cleanup();
+        throw;
+    }
+
+    std::printf("  m101 pending_timeouts\n");
 }
 
 void test_iec104_validate_config()
@@ -3369,32 +3587,8 @@ void test_iec104_parameters()
         [](iec_session_t *session, const iec_parameter_write_request_t *request, uint32_t *out_request_id) {
             return iec104_write_parameters(session, request, out_request_id);
         },
-        [](iec_session_t *session, const iec_parameter_verify_request_t *request, uint32_t *out_request_id) {
-            return iec104_verify_parameters(session, request, out_request_id);
-        },
         [](iec_session_t *session, const iec_setting_group_request_t *request, uint32_t *out_request_id) {
             return iec104_switch_setting_group(session, request, out_request_id);
-        });
-}
-
-void test_iec104_device_description()
-{
-    const auto valid = make_iec104_config();
-    exercise_device_description(
-        "iec104",
-        valid,
-        [](const iec_session_config_t *common,
-           const iec104_master_config_t *config,
-           const iec_transport_t *transport,
-           const iec_callbacks_t *callbacks,
-           iec_session_t **out_session) {
-            return iec104_create(common, config, transport, callbacks, out_session);
-        },
-        [](iec_session_t *session) { return iec104_destroy(session); },
-        [](iec_session_t *session) { return iec104_start(session); },
-        [](iec_session_t *session, uint32_t timeout_ms) { return iec104_stop(session, timeout_ms); },
-        [](iec_session_t *session, const iec_device_description_request_t *request, uint32_t *out_request_id) {
-            return iec104_get_device_description(session, request, out_request_id);
         });
 }
 
@@ -3425,9 +3619,6 @@ void test_iec104_file_transfer()
         },
         [](const iec_session_t *session, uint32_t transfer_id, iec_file_transfer_status_t *out_status) {
             return iec104_get_file_transfer_status(session, transfer_id, out_status);
-        },
-        [](iec_session_t *session, uint32_t transfer_id) {
-            return iec104_cancel_file_transfer(session, transfer_id);
         });
 }
 
@@ -3447,11 +3638,8 @@ void test_iec104_upgrade()
         [](iec_session_t *session) { return iec104_destroy(session); },
         [](iec_session_t *session) { return iec104_start(session); },
         [](iec_session_t *session, uint32_t timeout_ms) { return iec104_stop(session, timeout_ms); },
-        [](iec_session_t *session, const iec_upgrade_request_t *request, uint32_t *out_upgrade_id) {
-            return iec104_upgrade_firmware(session, request, out_upgrade_id);
-        },
-        [](iec_session_t *session, uint32_t upgrade_id) {
-            return iec104_cancel_upgrade(session, upgrade_id);
+        [](iec_session_t *session, const iec_upgrade_control_request_t *request, uint32_t *out_request_id) {
+            return iec104_upgrade_control(session, request, out_request_id);
         });
 }
 
@@ -3483,9 +3671,10 @@ int gw_protocol_run_lifecycle_tests(const char *filter)
         {"m101.read_point", test_m101_read_point},
         {"m101.clock", test_m101_clock},
         {"m101.parameters", test_m101_parameters},
-        {"m101.device_description", test_m101_device_description},
         {"m101.file_transfer", test_m101_file_transfer},
+        {"m101.file_read_window", test_m101_file_read_window},
         {"m101.upgrade", test_m101_upgrade},
+        {"m101.pending_timeouts", test_m101_pending_timeouts},
         {"iec101.validate_config", test_iec101_validate_config},
         {"iec101.lifecycle", test_iec101_lifecycle},
         {"iec101.raw_asdu", test_iec101_raw_asdu},
@@ -3495,7 +3684,6 @@ int gw_protocol_run_lifecycle_tests(const char *filter)
         {"iec101.read_point", test_iec101_read_point},
         {"iec101.clock", test_iec101_clock},
         {"iec101.parameters", test_iec101_parameters},
-        {"iec101.device_description", test_iec101_device_description},
         {"iec101.file_transfer", test_iec101_file_transfer},
         {"iec101.upgrade", test_iec101_upgrade},
         {"iec104.validate_config", test_iec104_validate_config},
@@ -3507,7 +3695,6 @@ int gw_protocol_run_lifecycle_tests(const char *filter)
         {"iec104.read_point", test_iec104_read_point},
         {"iec104.clock", test_iec104_clock},
         {"iec104.parameters", test_iec104_parameters},
-        {"iec104.device_description", test_iec104_device_description},
         {"iec104.file_transfer", test_iec104_file_transfer},
         {"iec104.upgrade", test_iec104_upgrade},
     };
