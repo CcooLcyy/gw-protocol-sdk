@@ -92,28 +92,12 @@ GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL m101_write_parameters(
     return gw::protocol::write_parameters(session, request, out_request_id);
 }
 
-GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL m101_verify_parameters(
-    iec_session_t *session,
-    const iec_parameter_verify_request_t *request,
-    uint32_t *out_request_id)
-{
-    return gw::protocol::verify_parameters(session, request, out_request_id);
-}
-
 GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL m101_switch_setting_group(
     iec_session_t *session,
     const iec_setting_group_request_t *request,
     uint32_t *out_request_id)
 {
     return gw::protocol::switch_setting_group(session, request, out_request_id);
-}
-
-GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL m101_get_device_description(
-    iec_session_t *session,
-    const iec_device_description_request_t *request,
-    uint32_t *out_request_id)
-{
-    return gw::protocol::get_device_description(session, request, out_request_id);
 }
 
 GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL m101_list_files(
@@ -148,26 +132,12 @@ GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL m101_get_file_transfer_status(
     return gw::protocol::get_file_transfer_status(session, transfer_id, out_status);
 }
 
-GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL m101_cancel_file_transfer(
+GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL m101_upgrade_control(
     iec_session_t *session,
-    uint32_t transfer_id)
+    const iec_upgrade_control_request_t *request,
+    uint32_t *out_request_id)
 {
-    return gw::protocol::cancel_file_transfer(session, transfer_id);
-}
-
-GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL m101_upgrade_firmware(
-    iec_session_t *session,
-    const iec_upgrade_request_t *request,
-    uint32_t *out_upgrade_id)
-{
-    return gw::protocol::upgrade_firmware(session, request, out_upgrade_id);
-}
-
-GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL m101_cancel_upgrade(
-    iec_session_t *session,
-    uint32_t upgrade_id)
-{
-    return gw::protocol::cancel_upgrade(session, upgrade_id);
+    return gw::protocol::upgrade_control(session, request, out_request_id);
 }
 
 GW_PROTOCOL_EXPORT iec_status_t GW_PROTOCOL_CALL m101_set_option(

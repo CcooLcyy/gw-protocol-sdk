@@ -62,6 +62,15 @@ typedef enum iec_log_level {
     IEC_LOG_DEBUG = 4
 } iec_log_level_t;
 
+typedef enum iec_link_event {
+    IEC_LINK_EVENT_CONNECTING = 1,
+    IEC_LINK_EVENT_CONNECTED = 2,
+    IEC_LINK_EVENT_DISCONNECTED = 3,
+    IEC_LINK_EVENT_RECONNECTING = 4,
+    IEC_LINK_EVENT_REMOTE_RESET = 5,
+    IEC_LINK_EVENT_LINK_ERROR = 6
+} iec_link_event_t;
+
 typedef struct iec_point_address {
     uint16_t common_address;
     uint32_t information_object_address;
@@ -257,41 +266,39 @@ typedef struct iec_parameter_descriptor {
     double step_value;
     const char *default_value_text;
     uint8_t supports_template;
-    uint8_t supports_verify;
+    uint8_t reserved;
 } iec_parameter_descriptor_t;
 
 typedef enum iec_parameter_read_mode {
     IEC_PARAMETER_READ_ALL = 1,
     IEC_PARAMETER_READ_BY_SCOPE = 2,
-    IEC_PARAMETER_READ_BY_GROUP = 3,
-    IEC_PARAMETER_READ_BY_ADDRESS_RANGE = 4
+    IEC_PARAMETER_READ_BY_ADDRESS_RANGE = 3
 } iec_parameter_read_mode_t;
 
 typedef struct iec_parameter_read_request {
     uint16_t common_address;
     iec_parameter_read_mode_t read_mode;
     iec_parameter_scope_t scope;
-    const char *group_name;
     uint32_t start_address;
     uint32_t end_address;
     uint8_t setting_group;
-    uint8_t include_descriptor;
 } iec_parameter_read_request_t;
+
+typedef enum iec_parameter_write_mode {
+    IEC_PARAMETER_WRITE_MODE_NONE = 0,
+    IEC_PARAMETER_WRITE_MODE_PRESET = 1,
+    IEC_PARAMETER_WRITE_MODE_EXECUTE = 2,
+    IEC_PARAMETER_WRITE_MODE_CANCEL = 3
+} iec_parameter_write_mode_t;
 
 typedef struct iec_parameter_write_request {
     uint16_t common_address;
     uint8_t setting_group;
+    iec_parameter_write_mode_t mode;
     const iec_parameter_item_t *items;
     uint32_t item_count;
-    uint8_t verify_after_write;
+    uint8_t reserved;
 } iec_parameter_write_request_t;
-
-typedef struct iec_parameter_verify_request {
-    uint16_t common_address;
-    uint8_t setting_group;
-    const iec_parameter_item_t *expected_items;
-    uint32_t item_count;
-} iec_parameter_verify_request_t;
 
 typedef enum iec_setting_group_action {
     IEC_SETTING_GROUP_ACTION_GET_CURRENT = 1,
@@ -307,21 +314,21 @@ typedef struct iec_setting_group_request {
 typedef enum iec_parameter_operation {
     IEC_PARAMETER_OPERATION_READ = 1,
     IEC_PARAMETER_OPERATION_WRITE = 2,
-    IEC_PARAMETER_OPERATION_VERIFY = 3,
-    IEC_PARAMETER_OPERATION_SWITCH_GROUP = 4
+    IEC_PARAMETER_OPERATION_SWITCH_GROUP = 3
 } iec_parameter_operation_t;
 
 typedef enum iec_parameter_result_code {
     IEC_PARAMETER_RESULT_ACCEPTED = 1,
     IEC_PARAMETER_RESULT_REJECTED = 2,
-    IEC_PARAMETER_RESULT_VERIFY_OK = 3,
-    IEC_PARAMETER_RESULT_VERIFY_MISMATCH = 4,
-    IEC_PARAMETER_RESULT_READ_ONLY = 5,
-    IEC_PARAMETER_RESULT_OUT_OF_RANGE = 6,
-    IEC_PARAMETER_RESULT_GROUP_SWITCHED = 7,
-    IEC_PARAMETER_RESULT_TIMEOUT = 8,
-    IEC_PARAMETER_RESULT_PROTOCOL_ERROR = 9,
-    IEC_PARAMETER_RESULT_CURRENT_GROUP = 10
+    IEC_PARAMETER_RESULT_READ_ONLY = 3,
+    IEC_PARAMETER_RESULT_OUT_OF_RANGE = 4,
+    IEC_PARAMETER_RESULT_GROUP_SWITCHED = 5,
+    IEC_PARAMETER_RESULT_TIMEOUT = 6,
+    IEC_PARAMETER_RESULT_PROTOCOL_ERROR = 7,
+    IEC_PARAMETER_RESULT_CURRENT_GROUP = 8,
+    IEC_PARAMETER_RESULT_PRESET_OK = 9,
+    IEC_PARAMETER_RESULT_EXECUTE_OK = 10,
+    IEC_PARAMETER_RESULT_CANCEL_OK = 11
 } iec_parameter_result_code_t;
 
 typedef struct iec_parameter_indication {
@@ -329,9 +336,7 @@ typedef struct iec_parameter_indication {
     iec_parameter_operation_t operation;
     uint8_t setting_group;
     uint8_t is_final;
-    uint8_t has_descriptor;
     iec_parameter_item_t item;
-    iec_parameter_descriptor_t descriptor;
 } iec_parameter_indication_t;
 
 typedef struct iec_parameter_result {
@@ -341,35 +346,14 @@ typedef struct iec_parameter_result {
     uint32_t parameter_id;
     uint32_t address;
     uint8_t setting_group;
+    iec_parameter_write_mode_t write_mode;
     uint8_t is_final;
 } iec_parameter_result_t;
-
-typedef enum iec_device_description_format {
-    IEC_DEVICE_DESCRIPTION_FORMAT_AUTO = 0,
-    IEC_DEVICE_DESCRIPTION_FORMAT_XML = 1,
-    IEC_DEVICE_DESCRIPTION_FORMAT_MSG = 2
-} iec_device_description_format_t;
-
-typedef struct iec_device_description_request {
-    uint16_t common_address;
-    iec_device_description_format_t preferred_format;
-    uint32_t max_content_size;
-} iec_device_description_request_t;
-
-typedef struct iec_device_description {
-    uint32_t request_id;
-    uint16_t common_address;
-    iec_device_description_format_t format;
-    const uint8_t *content;
-    uint32_t content_size;
-    uint8_t is_complete;
-} iec_device_description_t;
 
 typedef enum iec_file_operation {
     IEC_FILE_OPERATION_LIST = 1,
     IEC_FILE_OPERATION_READ = 2,
-    IEC_FILE_OPERATION_WRITE = 3,
-    IEC_FILE_OPERATION_CANCEL = 4
+    IEC_FILE_OPERATION_WRITE = 3
 } iec_file_operation_t;
 
 typedef enum iec_file_transfer_direction {
@@ -381,20 +365,19 @@ typedef enum iec_file_transfer_state {
     IEC_FILE_TRANSFER_STATE_ACCEPTED = 1,
     IEC_FILE_TRANSFER_STATE_RUNNING = 2,
     IEC_FILE_TRANSFER_STATE_COMPLETED = 3,
-    IEC_FILE_TRANSFER_STATE_CANCELED = 4,
-    IEC_FILE_TRANSFER_STATE_FAILED = 5
+    IEC_FILE_TRANSFER_STATE_FAILED = 4
 } iec_file_transfer_state_t;
 
 typedef enum iec_file_result_code {
     IEC_FILE_RESULT_ACCEPTED = 1,
     IEC_FILE_RESULT_COMPLETED = 2,
-    IEC_FILE_RESULT_CANCELED = 3,
-    IEC_FILE_RESULT_REJECTED = 4,
-    IEC_FILE_RESULT_NEGATIVE_CONFIRM = 5,
-    IEC_FILE_RESULT_OFFSET_MISMATCH = 6,
-    IEC_FILE_RESULT_TIMEOUT = 7,
-    IEC_FILE_RESULT_PROTOCOL_ERROR = 8,
-    IEC_FILE_RESULT_NOT_FOUND = 9
+    IEC_FILE_RESULT_REJECTED = 3,
+    IEC_FILE_RESULT_NEGATIVE_CONFIRM = 4,
+    IEC_FILE_RESULT_OFFSET_MISMATCH = 5,
+    IEC_FILE_RESULT_TIMEOUT = 6,
+    IEC_FILE_RESULT_PROTOCOL_ERROR = 7,
+    IEC_FILE_RESULT_NOT_FOUND = 8,
+    IEC_FILE_RESULT_UNSUPPORTED = 9
 } iec_file_result_code_t;
 
 typedef struct iec_file_list_request {
@@ -489,73 +472,39 @@ typedef struct iec_file_operation_result {
     uint8_t is_final;
 } iec_file_operation_result_t;
 
-typedef int(GW_PROTOCOL_CALL *iec_upgrade_read_chunk_fn)(
-    void *ctx,
-    uint32_t offset,
-    uint8_t *buffer,
-    uint32_t capacity,
-    uint32_t *out_len);
-
-typedef struct iec_upgrade_image_source {
-    void *ctx;
-    uint32_t total_size;
-    iec_upgrade_read_chunk_fn read;
-} iec_upgrade_image_source_t;
-
-typedef enum iec_upgrade_stage {
-    IEC_UPGRADE_STAGE_STARTING = 1,
-    IEC_UPGRADE_STAGE_WAIT_START_CONFIRM = 2,
-    IEC_UPGRADE_STAGE_EXECUTING = 3,
-    IEC_UPGRADE_STAGE_TRANSFERRING = 4,
-    IEC_UPGRADE_STAGE_FINISHING = 5,
-    IEC_UPGRADE_STAGE_CANCELING = 6,
-    IEC_UPGRADE_STAGE_COMPLETED = 7,
-    IEC_UPGRADE_STAGE_FAILED = 8,
-    IEC_UPGRADE_STAGE_CANCELED = 9
-} iec_upgrade_stage_t;
+typedef enum iec_upgrade_operation {
+    IEC_UPGRADE_OPERATION_START = 1,
+    IEC_UPGRADE_OPERATION_FINISH = 2,
+    IEC_UPGRADE_OPERATION_CANCEL = 3
+} iec_upgrade_operation_t;
 
 typedef enum iec_upgrade_result_code {
-    IEC_UPGRADE_RESULT_COMPLETED = 1,
+    IEC_UPGRADE_RESULT_ACCEPTED = 1,
     IEC_UPGRADE_RESULT_REJECTED = 2,
     IEC_UPGRADE_RESULT_CANCELED = 3,
     IEC_UPGRADE_RESULT_TIMEOUT = 4,
-    IEC_UPGRADE_RESULT_TRANSFER_FAILED = 5,
-    IEC_UPGRADE_RESULT_NEGATIVE_CONFIRM = 6,
-    IEC_UPGRADE_RESULT_PROTOCOL_ERROR = 7,
-    IEC_UPGRADE_RESULT_UNSUPPORTED = 8,
-    IEC_UPGRADE_RESULT_READ_FAILED = 9
+    IEC_UPGRADE_RESULT_NEGATIVE_CONFIRM = 5,
+    IEC_UPGRADE_RESULT_PROTOCOL_ERROR = 6,
+    IEC_UPGRADE_RESULT_UNSUPPORTED = 7
 } iec_upgrade_result_code_t;
 
-typedef struct iec_upgrade_request {
+typedef struct iec_upgrade_control_request {
     uint16_t common_address;
-    const char *remote_directory;
-    const char *remote_file_name;
-    iec_upgrade_image_source_t image;
-    uint32_t preferred_chunk_size;
-    const char *checksum_text;
-    uint8_t overwrite_existing;
+    uint32_t information_object_address;
+    iec_upgrade_operation_t operation;
     uint32_t command_timeout_ms;
-    uint32_t transfer_timeout_ms;
-} iec_upgrade_request_t;
-
-typedef struct iec_upgrade_progress {
-    uint32_t upgrade_id;
-    iec_upgrade_stage_t stage;
-    uint32_t transfer_id;
-    uint32_t bytes_transferred;
-    uint32_t total_size;
-    uint8_t percent;
-} iec_upgrade_progress_t;
+} iec_upgrade_control_request_t;
 
 typedef struct iec_upgrade_result {
-    uint32_t upgrade_id;
+    uint32_t request_id;
+    uint16_t common_address;
+    uint32_t information_object_address;
+    iec_upgrade_operation_t operation;
     iec_upgrade_result_code_t result;
-    iec_upgrade_stage_t final_stage;
-    uint32_t bytes_transferred;
-    uint32_t total_size;
     uint8_t cause_of_transmission;
     int32_t native_error_code;
     const char *detail_message;
+    uint8_t is_final;
 } iec_upgrade_result_t;
 
 typedef enum iec_raw_asdu_direction {
@@ -631,6 +580,12 @@ typedef void(GW_PROTOCOL_CALL *iec_on_session_state_fn)(
     iec_runtime_state_t state,
     void *user_context);
 
+typedef void(GW_PROTOCOL_CALL *iec_on_link_event_fn)(
+    iec_session_t *session,
+    iec_link_event_t event,
+    iec_status_t reason,
+    void *user_context);
+
 typedef void(GW_PROTOCOL_CALL *iec_on_point_indication_fn)(
     iec_session_t *session,
     const iec_point_address_t *address,
@@ -662,11 +617,6 @@ typedef void(GW_PROTOCOL_CALL *iec_on_parameter_result_fn)(
     const iec_parameter_result_t *result,
     void *user_context);
 
-typedef void(GW_PROTOCOL_CALL *iec_on_device_description_fn)(
-    iec_session_t *session,
-    const iec_device_description_t *description,
-    void *user_context);
-
 typedef void(GW_PROTOCOL_CALL *iec_on_file_list_indication_fn)(
     iec_session_t *session,
     const iec_file_list_indication_t *indication,
@@ -682,30 +632,31 @@ typedef void(GW_PROTOCOL_CALL *iec_on_file_operation_result_fn)(
     const iec_file_operation_result_t *result,
     void *user_context);
 
-typedef void(GW_PROTOCOL_CALL *iec_on_upgrade_progress_fn)(
-    iec_session_t *session,
-    const iec_upgrade_progress_t *progress,
-    void *user_context);
-
 typedef void(GW_PROTOCOL_CALL *iec_on_upgrade_result_fn)(
     iec_session_t *session,
     const iec_upgrade_result_t *result,
     void *user_context);
 
+typedef void(GW_PROTOCOL_CALL *iec_on_log_fn)(
+    iec_session_t *session,
+    iec_log_level_t level,
+    const char *message,
+    void *user_context);
+
 typedef struct iec_callbacks {
     iec_on_session_state_fn on_session_state;
+    iec_on_link_event_fn on_link_event;
     iec_on_point_indication_fn on_point_indication;
     iec_on_command_result_fn on_command_result;
-    iec_on_raw_asdu_fn on_raw_asdu;
-    iec_on_clock_result_fn on_clock_result;
-    iec_on_parameter_indication_fn on_parameter_indication;
-    iec_on_parameter_result_fn on_parameter_result;
     iec_on_file_list_indication_fn on_file_list_indication;
     iec_on_file_data_indication_fn on_file_data_indication;
     iec_on_file_operation_result_fn on_file_operation_result;
-    iec_on_device_description_fn on_device_description;
-    iec_on_upgrade_progress_fn on_upgrade_progress;
     iec_on_upgrade_result_fn on_upgrade_result;
+    iec_on_clock_result_fn on_clock_result;
+    iec_on_parameter_indication_fn on_parameter_indication;
+    iec_on_parameter_result_fn on_parameter_result;
+    iec_on_raw_asdu_fn on_raw_asdu;
+    iec_on_log_fn on_log;
 } iec_callbacks_t;
 
 #ifdef __cplusplus
@@ -790,17 +741,9 @@ GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL m101_write_parameters(
     iec_session_t *session,
     const iec_parameter_write_request_t *request,
     uint32_t *out_request_id);
-GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL m101_verify_parameters(
-    iec_session_t *session,
-    const iec_parameter_verify_request_t *request,
-    uint32_t *out_request_id);
 GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL m101_switch_setting_group(
     iec_session_t *session,
     const iec_setting_group_request_t *request,
-    uint32_t *out_request_id);
-GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL m101_get_device_description(
-    iec_session_t *session,
-    const iec_device_description_request_t *request,
     uint32_t *out_request_id);
 GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL m101_list_files(
     iec_session_t *session,
@@ -818,16 +761,10 @@ GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL m101_get_file_transfer_status(
     const iec_session_t *session,
     uint32_t transfer_id,
     iec_file_transfer_status_t *out_status);
-GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL m101_cancel_file_transfer(
+GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL m101_upgrade_control(
     iec_session_t *session,
-    uint32_t transfer_id);
-GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL m101_upgrade_firmware(
-    iec_session_t *session,
-    const iec_upgrade_request_t *request,
-    uint32_t *out_upgrade_id);
-GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL m101_cancel_upgrade(
-    iec_session_t *session,
-    uint32_t upgrade_id);
+    const iec_upgrade_control_request_t *request,
+    uint32_t *out_request_id);
 GW_PROTOCOL_API iec_status_t GW_PROTOCOL_CALL m101_set_option(
     iec_session_t *session,
     iec_option_t option,
