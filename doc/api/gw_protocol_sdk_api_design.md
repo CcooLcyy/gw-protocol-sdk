@@ -4,6 +4,7 @@
 
 | 版本号 | 日期 | 修改人 | 变更说明 |
 | --- | --- | --- | --- |
+| V1.4 | 2026-07-01 | 姜俊丞 | 补齐 20260420 技术方案附录 C 状态自检码实时上送事件建模：新增 `iec_self_check_code_t`、`iec_self_check_event_t` 和 `on_self_check_event` 回调；明确 `TI=42/COT=3` 自发报文由协议库解析为结构化事件，历史 `ulog` 自检记录文件继续复用通用文件接口。完整差异见 `gw_protocol_sdk_api_design_v1.3_to_v1.4_diff.md`。 |
 | V1.3 | 2026-06-01 | 姜俊丞 | 收敛文件断点续传口径：断点续传仅适用于写文件方向；读文件不再声明偏移续读或断点续传能力；运维101写文件续传偏移以终端 `0x88` 响应为准，文件传输状态接口仅提供本地状态快照。完整差异见 `gw_protocol_sdk_api_design_v1.2_to_v1.3_diff.md`。 |
 | V1.2 | 2026-05-21 | 姜俊丞 | 收敛参数下发、自描述文件、文件传输、软件升级、恢复出厂设置和设备重启的接口口径：参数下发改为预置/执行/取消；参数校验迁移到上位机；自描述复用通用文件接口；文件传输去除取消抽象；升级改为控制接口配合写文件；恢复出厂设置和设备重启按遥控扩展点两阶段处理。完整差异见 `gw_protocol_sdk_api_design_v1.1_to_v1.2_diff.md`。 |
 | V1.1 | 2026-05-20 | 姜俊丞 | 修订 API 语义一致性：补齐关键结构体总表，明确参数读取不承载分组/描述元数据、自描述按片段返回、参数写入不自动回读校验、文件不支持结果码、安全 transport 重连边界及运行期选项命名 |
@@ -24,6 +25,7 @@
 - 对外 ABI 使用 C ABI，便于 C/C++ 及其他语言绑定。
 - 数据接口以高层点表对象为主，同时保留原始 ASDU 旁路能力。
 - 参数读取、参数下发、定值区切换、文件目录召唤、文件读取、文件写入和写文件断点续传等统一运维能力通过独立高层接口承载；参数一致性比对、模板校验和差异定位由上位机实现。
+- 状态自检码实时上送按独立高层事件建模；协议库负责识别附录 C 的 `TI=42/COT=3` 自发报文并解析故障码数组，上层负责码表文字映射、展示、告警和落库。
 - 错误处理采用同步返回码 + 异步事件回调组合模型。
 
 ## 2. 适用范围
@@ -35,6 +37,7 @@
 - 标准104 主站会话创建、启动、停止、销毁。
 - 三套协议库共享会话生命周期、transport、回调和错误模型。
 - 点表上送事件建模，包括单点、双点、遥测、累计量等常见对象。
+- 状态自检码实时上送事件建模，包括设备自检故障遥信、故障时标和多故障码数组。
 - 参数读取、参数下发、定值区管理和终端自描述文件读取；自描述文件通过文件传输接口获取，参数校验能力由上位机基于参数读取结果和自描述/模板规则实现。
 - 文件目录召唤、文件读取、文件写入、状态查询和写文件断点续传。
 - 遥控、总召、电度量召唤、时钟同步等主站侧典型操作。
@@ -109,6 +112,7 @@
 | `on_session_state` | 生命周期状态变化时 | 观测会话从创建到运行、停止的状态流转 | 由库内工作线程触发 |
 | `on_link_event` | 建链、断链、重连、链路异常时 | 感知链路健康状态 | 由库内工作线程触发 |
 | `on_point_indication` | 收到高层点表对象时 | 接收单点、双点、遥测、累计量等对象 | 由库内工作线程触发 |
+| `on_self_check_event` | 收到状态自检码实时上送报文时 | 接收附录 C `TI=42/COT=3` 自发故障事件和故障码数组 | 由库内工作线程触发 |
 | `on_command_result` | 命令收到确认、否认或超时时 | 获取命令最终结果 | 由库内工作线程触发 |
 | `on_file_list_indication` | 收到文件目录分帧结果时 | 接收目录项并构建远端文件视图 | 由库内工作线程触发 |
 | `on_file_data_indication` | 收到文件读取数据块时 | 接收文件块并提供数据块位置和读取进度 | 由库内工作线程触发 |
@@ -126,9 +130,11 @@
 | --- | --- | --- |
 | `iec_session_config_t` | 公共配置 | 超时、重连间隔、日志等级、`user_context` |
 | `iec_transport_t` | 外部传输接口 | 明文帧发送函数、明文帧接收函数、上下文、最大明文帧长 |
-| `iec_callbacks_t` | 回调集合 | 状态、链路、点表、命令、文件目录、文件数据、文件结果、升级、时钟、参数、原始 ASDU、日志回调 |
+| `iec_callbacks_t` | 回调集合 | 状态、链路、点表、自检、命令、文件目录、文件数据、文件结果、升级、时钟、参数、原始 ASDU、日志回调 |
 | `iec_point_address_t` | 协议原生地址 | 公共地址、信息体地址、类型标识、传送原因 |
 | `iec_point_value_t` | 高层点值 | 点值类型、质量位、时间戳、实际数据 |
+| `iec_self_check_code_t` | 单个状态自检码 | 故障码信息体地址、原始故障码 |
+| `iec_self_check_event_t` | 状态自检实时上送事件 | 公共地址、故障遥信点号、故障状态、故障时标、故障码数组 |
 | `iec_command_request_t` | 控制命令 | 目标地址、命令类型、命令语义、命令模式、命令值 |
 | `iec_interrogation_request_t` | 总召请求 | 公共地址、总召限定词 |
 | `iec_counter_interrogation_request_t` | 电度量召唤请求 | 公共地址、召唤限定词、冻结语义 |
@@ -360,7 +366,7 @@ typedef struct iec_session iec_session_t;
 
 行为约束如下：
 
-- 高层数据接口是主路径，点表对象通过 `on_point_indication` 返回。
+- 高层数据接口是主路径，点表对象通过 `on_point_indication` 返回；状态自检码实时上送通过 `on_self_check_event` 返回，不要求调用方自行拆解原始 ASDU。
 - `<prefix>_control_point` 的最终结果以 `on_command_result` 为准。
 - `<prefix>_clock_sync` 和 `<prefix>_read_clock` 分别表达写终端时间和读终端时间，不应通过原始 ASDU 旁路或参数接口拼装实现。
 - 恢复出厂设置和设备重启通过遥控实现，作为遥控点表中的两个扩展遥控点；SDK 不固化具体点号或信息体地址，上层应根据终端自描述、点表模板或工程配置确定信息体地址、单点/双点类型和合闸/执行命令值后调用 `<prefix>_control_point`，不单独新增 `<prefix>_factory_reset` 或 `<prefix>_device_reboot` 函数。
@@ -687,7 +693,7 @@ typedef struct iec_point_value {
 | 步位值 | `IEC_POINT_STEP` | 分接头、步位状态上送 |
 | 32 位比特串 | `IEC_POINT_BITSTRING32` | 位图状态或扩展状态上送 |
 
-### 5.3 命令、召唤、校时与原始 ASDU 模型
+### 5.3 命令、召唤、校时、自检与原始 ASDU 模型
 
 本节类型说明如下：
 
@@ -705,6 +711,8 @@ typedef struct iec_point_value {
 | `iec_clock_operation_t` | 枚举 | 表达时钟操作类型 | 校时、读时钟 |
 | `iec_clock_result_code_t` | 枚举 | 表达时钟操作结果 | 接受、拒绝、超时、否定确认、协议错误、不支持 |
 | `iec_clock_result_t` | 结构体 | 表达时钟操作异步结果 | 请求 ID、操作类型、结果、终端时标、诊断信息 |
+| `iec_self_check_code_t` | 结构体 | 表达单个状态自检故障码 | 故障码信息体地址、原始故障码 |
+| `iec_self_check_event_t` | 结构体 | 表达状态自检码实时上送事件 | 公共地址、`TI=42`、`COT=3`、故障遥信点号、故障状态、故障时标、故障码数组 |
 | `iec_raw_asdu_direction_t` | 枚举 | 表达原始 ASDU 方向 | 接收、发送 |
 | `iec_raw_asdu_event_t` | 结构体 | 表达原始 ASDU 观察事件 | 方向、公共地址、类型标识、传送原因、载荷、时间戳 |
 | `iec_raw_asdu_tx_t` | 结构体 | 表达原始 ASDU 透传发送请求 | 载荷、长度、是否绕过高层校验 |
@@ -827,6 +835,24 @@ typedef struct iec_clock_result {
     const char *detail_message;            /* 可选诊断文本 */
 } iec_clock_result_t;
 
+typedef struct iec_self_check_code {
+    uint32_t information_object_address;   /* 故障码遥测信息体地址 */
+    uint32_t code;                         /* 原始状态自检码, 如 0x0202 */
+} iec_self_check_code_t;
+
+typedef struct iec_self_check_event {
+    uint16_t common_address;               /* ASDU 公共地址 */
+    uint8_t type_id;                       /* 类型标识, 附录 C 固定为 42 */
+    uint8_t cause_of_transmission;         /* 传送原因, 附录 C 通常为 3 自发 */
+    uint8_t originator_address;            /* 发起者地址 */
+    uint32_t fault_signal_address;         /* 设备自检故障遥信点号 */
+    uint8_t fault_value;                   /* 1 表示有故障码, 0 表示无故障码或故障消除 */
+    uint8_t has_fault_time;                /* 是否携带有效故障时标 */
+    iec_timestamp_t fault_time;            /* 最后一个故障码发生时刻 */
+    const iec_self_check_code_t *codes;    /* 故障码数组, 当前回调期间有效 */
+    uint32_t code_count;                   /* 故障码数量 */
+} iec_self_check_event_t;
+
 typedef enum iec_raw_asdu_direction {
     IEC_RAW_ASDU_RX = 1, /* 接收方向 */
     IEC_RAW_ASDU_TX = 2  /* 发送方向 */
@@ -859,6 +885,10 @@ typedef struct iec_raw_asdu_tx {
 - 设备重启或复位进程在终端确认执行命令后可能立即重启并断开链路，`on_command_result` 只表示命令确认结果，后续链路变化通过 `on_link_event` 上报。
 - 恢复出厂设置或设备重启完成后，终端数据和参数缓存应视为失效；上层应在链路恢复后重新总召、读取参数或重新读取自描述文件。
 - `iec_clock_result_t.has_timestamp` 仅在读时钟成功且终端返回有效时标时为真；校时结果主要关注 `result` 和诊断字段。
+- 状态自检码实时上送是附录 C 定义的终端自发事件，协议库收到 `TI=42`、`COT=3` 且格式合法的报文后触发 `on_self_check_event`；该事件不需要上层先调用主动查询 API。
+- `iec_self_check_event_t.fault_value = 1` 表示本次上送包含或指示存在自检故障；`fault_value = 0` 表示无故障码或故障消除状态，具体消除语义以终端实现和现场联调为准。
+- `iec_self_check_event_t.codes` 只承载原始故障码和对应信息体地址；`0101H`、`0202H`、`0304H` 等码值到中文描述、告警等级和处置建议的映射由上层应用按附录 C 码表维护。
+- 状态自检码实时上送不通过 `on_point_indication` 分拆为普通遥信/遥测点。若调用方需要抓取原始报文，可同时开启 `on_raw_asdu` 旁路。
 
 ### 5.4 参数、自描述文件、文件与升级模型
 
@@ -1243,6 +1273,7 @@ typedef struct iec_parameter_result {
 | `iec_command_result_code_t` | 枚举 | 表达遥控或遥调命令结果 | 接受、拒绝、超时、否定确认、协议错误 |
 | `iec_command_result_t` | 结构体 | 表达命令异步结果 | 命令 ID、命令语义、结果码、目标地址、最终标志 |
 | `iec_clock_result_t` | 结构体 | 表达校时或时钟读取异步结果 | 请求 ID、操作类型、结果码、终端时标、诊断信息 |
+| `iec_self_check_event_t` | 结构体 | 表达状态自检码实时上送事件 | 故障遥信、故障时标、故障码数组 |
 
 回调集合说明如下：
 
@@ -1251,6 +1282,7 @@ typedef struct iec_parameter_result {
 | `on_session_state` | `iec_on_session_state_fn` | 会话生命周期状态变化 | `iec_runtime_state_t` | 值传递 |
 | `on_link_event` | `iec_on_link_event_fn` | 建链、断链、重连或链路异常 | `iec_link_event_t`、`iec_status_t` | 值传递 |
 | `on_point_indication` | `iec_on_point_indication_fn` | 收到遥信、遥测、累计量等点表数据 | `iec_point_address_t`、`iec_point_value_t` | 当前回调期间有效 |
+| `on_self_check_event` | `iec_on_self_check_event_fn` | 收到附录 C 状态自检码实时上送报文 | `iec_self_check_event_t` | 当前回调期间有效 |
 | `on_command_result` | `iec_on_command_result_fn` | 遥控或遥调命令出现确认、否认、超时或最终结果 | `iec_command_result_t` | 当前回调期间有效 |
 | `on_file_list_indication` | `iec_on_file_list_indication_fn` | 收到文件目录项分片 | `iec_file_list_indication_t` | 当前回调期间有效 |
 | `on_file_data_indication` | `iec_on_file_data_indication_fn` | 收到文件读取数据块 | `iec_file_data_indication_t` | 当前回调期间有效 |
@@ -1337,6 +1369,20 @@ typedef void (*iec_on_point_indication_fn)(
     iec_session_t *session,
     const iec_point_address_t *address,
     const iec_point_value_t *value,
+    void *user_context);
+
+/**
+ * @brief 状态自检码实时上送回调。
+ *
+ * @param[in] session      触发回调的会话句柄。
+ * @param[in] event        状态自检事件视图，在当前回调期间有效。
+ * @param[in] user_context 用户上下文，原样来自 `iec_session_config_t.user_context`。
+ *
+ * @note `event->codes` 仅在当前回调期间有效；如需跨线程展示、告警或落库，应立即拷贝。
+ */
+typedef void (*iec_on_self_check_event_fn)(
+    iec_session_t *session,
+    const iec_self_check_event_t *event,
     void *user_context);
 
 /**
@@ -1475,6 +1521,7 @@ typedef struct iec_callbacks {
     iec_on_session_state_fn on_session_state; /* 生命周期回调 */
     iec_on_link_event_fn on_link_event;       /* 链路事件回调 */
     iec_on_point_indication_fn on_point_indication; /* 点表回调 */
+    iec_on_self_check_event_fn on_self_check_event; /* 状态自检码实时上送回调 */
     iec_on_command_result_fn on_command_result; /* 命令结果回调 */
     iec_on_file_list_indication_fn on_file_list_indication; /* 文件目录回调 */
     iec_on_file_data_indication_fn on_file_data_indication; /* 文件数据回调 */
@@ -1495,11 +1542,11 @@ typedef struct iec_callbacks {
 - 不同会话之间回调允许并发发生。
 - 回调函数必须尽快返回，禁止执行长时间阻塞操作。
 - 回调中采用业务队列、轻量级拷贝和异步处理模式最稳妥。
-- 若需要跨线程保留回调中的地址、点值、参数值、文件目录项、文件数据块、升级控制结果、时钟结果、日志内容或原始 ASDU 数据，调用方应自行拷贝；自描述文件内容属于文件数据块，也应在 `on_file_data_indication` 回调期间立即拷贝。
+- 若需要跨线程保留回调中的地址、点值、自检码数组、参数值、文件目录项、文件数据块、升级控制结果、时钟结果、日志内容或原始 ASDU 数据，调用方应自行拷贝；自描述文件内容属于文件数据块，也应在 `on_file_data_indication` 回调期间立即拷贝。
 
 回调重入规则如下：
 
-- `on_point_indication`、`on_command_result`、`on_file_list_indication`、`on_file_data_indication`、`on_file_operation_result`、`on_upgrade_result`、`on_clock_result`、`on_parameter_indication`、`on_parameter_result`、`on_raw_asdu` 允许在其他业务线程触发新的控制 API。
+- `on_point_indication`、`on_self_check_event`、`on_command_result`、`on_file_list_indication`、`on_file_data_indication`、`on_file_operation_result`、`on_upgrade_result`、`on_clock_result`、`on_parameter_indication`、`on_parameter_result`、`on_raw_asdu` 允许在其他业务线程触发新的控制 API。
 - 库内部保证线程安全，业务时序由上层状态机或串行控制线程协调。
 - 生命周期控制 API 与回调之间的竞态由调用方控制。
 
@@ -1646,6 +1693,8 @@ iec_status_t iec104_validate_config(const iec104_master_config_t *config);
 - 升级包写入阶段通过 `<prefix>_write_file` 映射到 `TI=210` 文件传输报文；上层负责在启动升级确认后显式调用文件写入接口。
 - 启动升级、文件升级结束和撤销升级的控制结果通过 `on_upgrade_result` 返回；升级包写入阶段的结果通过 `on_file_operation_result` 返回。
 - 协议库根据 `operation` 映射 `COT` 和 `CTYPE.S/E`，上层不直接拼装 `S/E` 位或原始 `TI=211` 报文。
+- 状态自检码实时上送按 20260420 技术方案附录 C 建模。协议库收到 `TI=42`、`COT=3` 的故障值信息报文时，应解析设备自检故障遥信、CP56Time2a 故障时标、故障码个数和故障码数组，并通过 `on_self_check_event` 返回结构化事件。
+- 状态自检码历史记录文件 `ulog` 属于终端文件，不新增专用读取 API；上层按终端目录约定或目录召唤结果调用 `<prefix>_read_file` 读取 msg/xml 内容，并在上层完成 `logType=04` 记录解析、展示、导出和可视化处理。
 - 终端 XML/msg 自描述文件通过通用文件传输接口获取，不再提供 `<prefix>_get_device_description` 之类的单独接口。
 - 上层应按终端约定、工程配置或目录召唤结果确定自描述文件所在目录和文件名，然后调用 `<prefix>_read_file` 读取；文件数据通过 `on_file_data_indication` 返回，最终结果通过 `on_file_operation_result` 返回。
 - 自描述文件建议控制在 64KB 以内。库负责处理底层协议分帧和顺序交付，不承诺聚合为单次大块回调；`iec_file_data_indication_t.is_final` 标记当前数据块是否为本次读取最后一块。
@@ -1720,6 +1769,7 @@ iec_callbacks_t cbs = {
     .on_session_state = on_session_state,    /* 生命周期状态变化 */
     .on_link_event = on_link_event,          /* 链路事件 */
     .on_point_indication = on_point_indication, /* 高层点表上送 */
+    .on_self_check_event = on_self_check_event, /* 状态自检码实时上送 */
     .on_command_result = on_command_result,  /* 命令结果 */
     .on_file_list_indication = on_file_list_indication, /* 文件目录回调 */
     .on_file_data_indication = on_file_data_indication, /* 文件数据回调 */
@@ -1812,6 +1862,7 @@ iec_callbacks_t cbs = {
     .on_session_state = on_session_state,    /* 生命周期状态变化 */
     .on_link_event = on_link_event,          /* 链路事件 */
     .on_point_indication = on_point_indication, /* 高层点表上送 */
+    .on_self_check_event = on_self_check_event, /* 状态自检码实时上送 */
     .on_command_result = on_command_result,  /* 命令结果 */
     .on_file_list_indication = on_file_list_indication, /* 文件目录回调 */
     .on_file_data_indication = on_file_data_indication, /* 文件数据回调 */
@@ -1921,6 +1972,53 @@ static void on_point_indication(
 3. 将 `address` 与 `value` 拷贝到业务队列。
 4. 业务线程做点位映射、告警和落库。
 5. 回调线程尽快返回，避免阻塞后续收发。
+
+### 7.3.1 状态自检码实时上送流程
+
+状态自检码实时上送用于承接 20260420 技术方案附录 C 的设备自检故障信息。该流程是终端主动上送流程，不需要上层先调用请求 API。协议库收到 `TI=42`、`COT=3` 的故障值信息报文后，将其中的设备自检故障遥信、故障时标和故障码数组解析为 `iec_self_check_event_t`，并通过 `on_self_check_event` 通知上层。
+
+```mermaid
+sequenceDiagram
+    participant 终端 as 配电终端
+    participant 库 as 动态库
+    participant 回调 as 自检事件回调
+    participant 业务 as 业务线程/告警中心
+
+    终端->>库: 自发上送 TI=42/COT=3 状态自检码报文
+    库->>库: 解析故障遥信、CP56Time2a和故障码数组
+    库->>回调: on_self_check_event(event)
+    回调->>业务: 拷贝故障状态和故障码数组
+    业务->>业务: 按附录C码表映射、展示、告警、落库
+```
+
+```c
+/* 状态自检码实时上送回调: 终端主动上送 TI=42/COT=3 时触发。 */
+static void on_self_check_event(
+    iec_session_t *session,
+    const iec_self_check_event_t *event,
+    void *user_context)
+{
+    (void)session;
+    (void)user_context;
+
+    if (event->fault_value != 0) {
+        for (uint32_t i = 0; i < event->code_count; ++i) {
+            uint32_t code = event->codes[i].code;
+            /* 例如 0x0202 表示 SIM 卡插接异常；文字映射由上层码表完成。 */
+            (void)code;
+        }
+    }
+}
+```
+
+推荐处理步骤如下：
+
+1. 在 `<prefix>_create` 阶段注册 `on_self_check_event`；该回调只依赖会话处于运行态和终端主动上送，不需要单独发起读取命令。
+2. 回调中立即拷贝 `event` 中的故障状态、故障时标和 `codes` 数组；`codes` 指针仅在当前回调期间有效。
+3. 上层按附录 C 码表将原始故障码映射为诊断对象、状态描述、状态原因和展示文本；协议库不固化中文描述、告警等级或处置建议。
+4. `fault_value = 1` 表示存在自检故障码；`fault_value = 0` 表示无故障码或故障消除状态，具体消除语义应结合终端实现确认。
+5. 状态自检码历史记录文件 `ulog` 不是实时回调的一部分。上层如需查询历史记录，应通过 `<prefix>_list_files` 和 `<prefix>_read_file` 读取 `ulog` 文件，并解析其中 `logType=04` 的 msg/xml 记录。
+6. 若需要联调原始字节，可同时开启 `on_raw_asdu`；高层自检事件解析成功后仍应触发 `on_self_check_event`。
 
 ### 7.4 原始 ASDU 旁路流程
 
@@ -2802,6 +2900,7 @@ iec101_send_raw_asdu(session, &raw_req);
 - 文件目录召唤、文件读取和文件写入结果。
 - 程序升级控制命令确认、否认、超时和撤销结果。
 - 校时和时钟读取结果。
+- 状态自检码实时上送事件。
 - 日志和告警信息。
 
 推荐约定如下：
@@ -2812,12 +2911,14 @@ iec101_send_raw_asdu(session, &raw_req);
 - 文件目录、文件读取和文件写入最终结果以 `on_file_operation_result` 为准；若出现协议否定确认、传送原因异常或厂商扩展错误，应优先读取其中的诊断字段。
 - 程序升级控制结果以 `on_upgrade_result` 为准；升级包写入结果以 `on_file_operation_result` 为准。
 - 校时和时钟读取最终结果以 `on_clock_result` 为准。
+- 状态自检码实时上送以 `on_self_check_event` 为准；历史 `ulog` 文件读取结果仍以文件接口回调为准。
 - 运行期链路变化和协议事件通过异步回调通知上层。
 
 ### 8.4 高层数据主路径与原始旁路关系
 
 - 高层点表接口是默认主路径，业务系统应优先依赖 `on_point_indication`。
 - 变化遥测、变位遥信和周期上送仍属于点表主路径，不单独拆分专属回调；上层通过 `point_type`、`type_id`、`cause_of_transmission`、质量位和时标信息完成业务分流。
+- 状态自检码实时上送是独立高层事件，附录 C 的 `TI=42/COT=3` 报文不应被拆分为普通点表对象，也不应要求调用方只通过 `on_raw_asdu` 自行解析。
 - 参数接口是独立主路径，参数读取和参数下发不应通过点表接口或遥控接口拼装实现。
 - 文件接口是独立主路径，目录召唤、文件传输和写文件断点续传不应通过 `<prefix>_send_raw_asdu` 或自定义旁路报文暴露给上层。
 - 程序升级控制接口是独立高层主路径，启动升级、文件升级结束和撤销升级不应通过 `<prefix>_send_raw_asdu` 拼装；升级包写入阶段应显式使用文件接口。
@@ -2841,6 +2942,7 @@ iec101_send_raw_asdu(session, &raw_req);
 - 无线模块、电源模块、线损模块在接口层统一视为参数域，避免为具体业务模块重复设计函数族。
 - `<prefix>_read_point` 适合点表对象读取，不负责表达“读取全部运行参数”“读取某定值区全部参数”这类参数语义。
 - 点表在线读取和修改属于参数接口范畴，使用 `IEC_PARAMETER_SCOPE_POINT_TABLE` 表达点表配置域；点表模板下发后的结果比对由上位机通过参数读取结果完成；实时点值召测和上送仍属于点表接口范畴。
+- 状态自检码实时上送由协议库解析报文结构并触发 `on_self_check_event`；故障码到中文描述、告警等级、处置建议和历史趋势分析由上层应用按附录 C 码表和业务规则实现。
 - `<prefix>_control_point` 适合遥控、设定值命令、恢复出厂设置和设备重启等以遥控格式承载的扩展运维命令，不承担模板下发、参数下发和参数比对职责。
 - 恢复出厂设置和设备重启的操作确认、权限控制、安全闭锁、无线运维模式限制和审计落库属于上层应用职责；动态库只负责已确认命令的协议封装、发送、确认/否认解析和结果回调。
 - 通用文件 API 负责目录、数据块、状态快照和写文件续传等高层文件语义；运维101写文件续传偏移以终端 `0x88` 响应为准，状态快照中的本地偏移仅用于进度参考和诊断。终端模型文件、XML/msg 自描述文件和普通远端文件统一通过 `<prefix>_list_files`、`<prefix>_read_file`、`<prefix>_write_file` 和 `<prefix>_get_file_transfer_status` 等文件接口处理。
