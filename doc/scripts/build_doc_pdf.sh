@@ -15,14 +15,36 @@ if [[ ! -f "${INPUT_PATH}" ]]; then
 fi
 
 INPUT_ABS="$(cd "$(dirname "${INPUT_PATH}")" && pwd)/$(basename "${INPUT_PATH}")"
-DEFAULT_INPUT_ABS="$(cd "$(dirname "${DEFAULT_INPUT}")" && pwd)/$(basename "${DEFAULT_INPUT}")"
 DOC_BASENAME="$(basename "${INPUT_ABS}" .md)"
+
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "error: required command not found: python3" >&2
+  exit 1
+fi
+
+DOC_TITLE="$(
+python3 - "${INPUT_ABS}" <<'PY'
+import re
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+title = path.stem
+for line in path.read_text(encoding="utf-8").splitlines():
+    if line.startswith("# "):
+        title = line[2:].strip()
+        break
+
+title = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", title)
+title = re.sub(r"\s+", " ", title).strip().rstrip(".")
+print(title or path.stem)
+PY
+)"
+
 if [[ $# -ge 2 ]]; then
   OUTPUT_PATH="${2}"
-elif [[ "${INPUT_ABS}" == "${DEFAULT_INPUT_ABS}" ]]; then
-  OUTPUT_PATH="${DOC_ROOT}/generated/gw_protocol_sdk_api_design.pdf"
 else
-  OUTPUT_PATH="${DOC_ROOT}/generated/${DOC_BASENAME}.pdf"
+  OUTPUT_PATH="${DOC_ROOT}/generated/${DOC_TITLE}.pdf"
 fi
 OUTPUT_ABS="$(mkdir -p "$(dirname "${OUTPUT_PATH}")" && cd "$(dirname "${OUTPUT_PATH}")" && pwd)/$(basename "${OUTPUT_PATH}")"
 
@@ -36,7 +58,7 @@ CSS_PATH="${BUILD_DIR}/markdown-pdf.css"
 mkdir -p "${BUILD_DIR}"
 cp "${DOC_ROOT}/tools/pdf/markdown-pdf.css" "${CSS_PATH}"
 
-for cmd in python3 node npm pandoc; do
+for cmd in node npm pandoc; do
   if ! command -v "${cmd}" >/dev/null 2>&1; then
     echo "error: required command not found: ${cmd}" >&2
     exit 1
@@ -159,20 +181,6 @@ run_pypdf_python() {
 python3 "${DOC_ROOT}/scripts/render_mermaid_markdown.py" \
   "${INPUT_ABS}" \
   "${RENDERED_MD}"
-
-DOC_TITLE="$(
-python3 - "${INPUT_ABS}" <<'PY'
-from pathlib import Path
-import sys
-
-for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
-    if line.startswith("# "):
-        print(line[2:].strip())
-        break
-else:
-    print(Path(sys.argv[1]).stem)
-PY
-)"
 
 pandoc \
   "${RENDERED_MD}" \
