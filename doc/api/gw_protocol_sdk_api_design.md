@@ -4,6 +4,7 @@
 
 | 版本号 | 日期 | 修改人 | 变更说明 |
 | --- | --- | --- | --- |
+| V1.5 | 2026-07-13 | 姜俊丞 | 新增文件写取消接口：m101、iec101、iec104 三套库均提供同形写取消入口；写文件方向支持通过独立取消请求中止进行中的写传输；读文件不新增取消入口；文件状态与结果补充取消态和取消结果码。完整差异见 `gw_protocol_sdk_api_design_v1.4_to_v1.5_diff.md`。 |
 | V1.4 | 2026-07-01 | 姜俊丞 | 补齐 20260420 技术方案附录 C 状态自检码实时上送事件建模：新增 `iec_self_check_code_t`、`iec_self_check_event_t` 和 `on_self_check_event` 回调；明确 `TI=42/COT=3` 自发报文由协议库解析为结构化事件，历史 `ulog` 自检记录文件继续复用通用文件接口。完整差异见 `gw_protocol_sdk_api_design_v1.3_to_v1.4_diff.md`。 |
 | V1.3 | 2026-06-01 | 姜俊丞 | 收敛文件断点续传口径：断点续传仅适用于写文件方向；读文件不再声明偏移续读或断点续传能力；运维101写文件续传偏移以终端 `0x88` 响应为准，文件传输状态接口仅提供本地状态快照。完整差异见 `gw_protocol_sdk_api_design_v1.2_to_v1.3_diff.md`。 |
 | V1.2 | 2026-05-21 | 姜俊丞 | 收敛参数下发、自描述文件、文件传输、软件升级、恢复出厂设置和设备重启的接口口径：参数下发改为预置/执行/取消；参数校验迁移到上位机；自描述复用通用文件接口；文件传输去除取消抽象；升级改为控制接口配合写文件；恢复出厂设置和设备重启按遥控扩展点两阶段处理。完整差异见 `gw_protocol_sdk_api_design_v1.1_to_v1.2_diff.md`。 |
@@ -39,7 +40,7 @@
 - 点表上送事件建模，包括单点、双点、遥测、累计量等常见对象。
 - 状态自检码实时上送事件建模，包括设备自检故障遥信、故障时标和多故障码数组。
 - 参数读取、参数下发、定值区管理和终端自描述文件读取；自描述文件通过文件传输接口获取，参数校验能力由上位机基于参数读取结果和自描述/模板规则实现。
-- 文件目录召唤、文件读取、文件写入、状态查询和写文件断点续传。
+- 文件目录召唤、文件读取、文件写入、写文件取消、状态查询和写文件断点续传。
 - 遥控、总召、电度量召唤、时钟同步等主站侧典型操作。
 - 原始 ASDU 观察和透传发送能力。
 - 链路状态、异常、日志、命令结果、参数结果、文件目录结果、文件传输结果和升级控制结果等异步事件回调。
@@ -64,7 +65,7 @@
 - 公共类型负责生命周期、运行控制、点表事件、命令、旁路和统一错误语义。
 - 串口参数、远端地址、端口、安全认证和真实物理收发由上位机或安全适配层处理，不进入协议库配置。
 - 协议库通过 `iec_transport_t` 收发明文协议帧；明文传输、安全封装、串口或 socket 细节均由 transport 实现。
-- 文件目录、文件读取、文件写入和写文件断点续传保持同形函数签名；运维101库导出 `m101_` 前缀，标准101/104库导出各自协议前缀。
+- 文件目录、文件读取、文件写入、写文件取消和写文件断点续传保持同形函数签名；运维101库导出 `m101_` 前缀，标准101/104库导出各自协议前缀。
 - 公共结构体保持轻量字段布局，沿用项目既有接入习惯，不引入额外版本握手字段。
 - 所有回调都在 `<prefix>_create` 阶段注册，由库内工作线程触发。
 - 参数模板导入导出和界面生成由上层应用负责，动态库负责参数对象建模和协议交互。
@@ -99,6 +100,7 @@
 | `<prefix>_list_files` | 召唤远端文件目录 | 文件目录请求结构体 | 请求是否被接受并生成请求 ID | `on_file_list_indication`、`on_file_operation_result` |
 | `<prefix>_read_file` | 读取远端文件，文件数据按块返回 | 文件读取请求结构体 | 请求是否被接受并生成传输 ID | `on_file_data_indication`、`on_file_operation_result` |
 | `<prefix>_write_file` | 写入远端文件，支持写文件方向断点续传 | 文件写入请求结构体 | 请求是否被接受并生成传输 ID | `on_file_operation_result` |
+| `<prefix>_cancel_file_write` | 取消正在进行的写文件传输 | 文件写取消请求结构体 | 请求是否被接受并生成请求 ID | `on_file_operation_result` |
 | `<prefix>_get_file_transfer_status` | 查询文件传输本地状态快照 | 传输 ID | 是否成功写出当前状态视图 | 无 |
 | `<prefix>_upgrade_control` | 发送程序升级控制命令 | 升级控制请求结构体 | 请求是否被接受并生成请求 ID | `on_upgrade_result` |
 | `<prefix>_clock_sync` | 发送校时命令 | 校时请求结构体 | 请求是否被接受并生成请求 ID | `on_clock_result` |
@@ -116,7 +118,7 @@
 | `on_command_result` | 命令收到确认、否认或超时时 | 获取命令最终结果 | 由库内工作线程触发 |
 | `on_file_list_indication` | 收到文件目录分帧结果时 | 接收目录项并构建远端文件视图 | 由库内工作线程触发 |
 | `on_file_data_indication` | 收到文件读取数据块时 | 接收文件块并提供数据块位置和读取进度 | 由库内工作线程触发 |
-| `on_file_operation_result` | 文件目录或文件读写完成时 | 获取文件类请求的最终结果 | 由库内工作线程触发 |
+| `on_file_operation_result` | 文件目录、文件读写或写文件取消完成时 | 获取文件类请求的最终结果 | 由库内工作线程触发 |
 | `on_upgrade_result` | 程序升级控制命令收到确认、否认或超时时 | 获取启动升级、文件升级结束或撤销升级的控制结果和诊断信息 | 由库内工作线程触发 |
 | `on_clock_result` | 校时或时钟读取完成时 | 获取校时确认、终端当前时间或失败诊断 | 由库内工作线程触发 |
 | `on_parameter_indication` | 收到参数读取结果时 | 接收参数值分帧结果，不承载描述或分组元数据 | 由库内工作线程触发 |
@@ -468,7 +470,20 @@ typedef struct iec_session iec_session_t;
 | 出参 | `uint32_t *out_transfer_id`: 传输 ID 输出地址。成功时由库生成，用于关联状态与最终结果。 |
 | 返回值 | `IEC_STATUS_OK`: 请求已进入发送流程；失败返回其他错误码，详见返回码定义。 |
 | 异步回调 | `on_file_operation_result`。 |
-| 备注 | `request->content` 与 `request->content_size` 描述本次待发送窗口。若需要断点续传，调用方可在后续重新发起 `<prefix>_write_file`，并提供可覆盖续传位置的内容窗口；运维101库应在写文件续传路径中封装 `0x87/0x88` 交互，以终端 `0x88` 响应的起始数据段号作为实际续传偏移。 |
+| 备注 | `request->content` 与 `request->content_size` 描述本次待发送窗口。若需要断点续传，调用方可在后续重新发起 `<prefix>_write_file`，并提供可覆盖续传位置的内容窗口；运维101库应在写文件续传路径中封装 `0x87/0x88` 交互，以终端 `0x88` 响应的起始数据段号作为实际续传偏移。写文件取消由 `<prefix>_cancel_file_write` 单独处理，不应混入本接口参数。 |
+
+#### <prefix>_cancel_file_write
+
+| 字段 | 内容 |
+| --- | --- |
+| 函数名称 | `iec_status_t <prefix>_cancel_file_write(iec_session_t *session, const iec_file_write_cancel_request_t *request, uint32_t *out_request_id)` |
+| 函数功能 | 取消正在进行的写文件传输。 |
+| 入参 | `iec_session_t *session`: 目标会话句柄。 |
+|  | `const iec_file_write_cancel_request_t *request`: 写文件取消请求，提供目标公共地址、待取消的写文件传输 ID 和命令超时。 |
+| 出参 | `uint32_t *out_request_id`: 取消请求 ID 输出地址。成功时由库生成，用于关联异步结果。 |
+| 返回值 | `IEC_STATUS_OK`: 请求已进入发送流程；失败返回其他错误码，详见返回码定义。 |
+| 异步回调 | `on_file_operation_result`。 |
+| 备注 | 本接口只取消写文件方向的进行中传输；读文件不新增取消入口。三套库保持同形导出，实际函数名分别为 `m101_cancel_file_write`、`iec101_cancel_file_write` 和 `iec104_cancel_file_write`。取消请求的最终接受、拒绝、超时或完成状态仍以 `on_file_operation_result` 为准。 |
 
 #### <prefix>_get_file_transfer_status
 
@@ -485,14 +500,14 @@ typedef struct iec_session iec_session_t;
 
 行为约束如下：
 
-- 文件目录、文件读取、文件写入和写文件断点续传属于统一高层运维能力，不通过 `<prefix>_send_raw_asdu` 直接暴露。
+- 文件目录、文件读取、文件写入、写文件取消和写文件断点续传属于统一高层运维能力，不通过 `<prefix>_send_raw_asdu` 直接暴露。
 - `iec_file_write_request_t.start_offset = 0` 表示首次写入或由库从文件起点开始组织写入窗口；非零偏移表示调用方提供的写文件窗口起点。读文件请求不提供起始偏移字段。
 - 运维101写文件断点续传由库在 `<prefix>_write_file` 的续传写入路径中发送 `0x87` 写文件激活续传查询，并以终端 `0x88` 写文件激活确认续传响应中的起始数据段号作为实际续传偏移。
 - 运维101库的文件传输单块数据长度应按运维101的 `1024` 字节扩展上限建模，同时不得超过 transport 的 `max_plain_frame_len`；标准101场景仍应遵守传统 `255` 字节边界。
 - 若上层给出的 `max_chunk_size` 或 `preferred_chunk_size` 超过当前协议库和 transport 可承载上限，库内部应自动裁剪或分块，不要求调用方手工按帧拆分。
 - `<prefix>_get_file_transfer_status` 只提供当前会话内可见的本地状态快照，用于状态展示、进度参考和诊断；本函数不触发远端轮询，不发送运维101 `0x87`，其中的 `acknowledged_offset` 不作为运维101写文件断点续传的权威恢复点。
-- 文件读写最终结果统一以 `on_file_operation_result` 为准；调用返回 `IEC_STATUS_OK` 仅表示请求已被受理。
-- 若对端返回否定确认、传送原因异常或厂商扩展错误，库应尽量填充 `iec_file_operation_result_t.cause_of_transmission`、`native_error_code` 和 `detail_message`，便于上层排障。
+- 文件读写和写文件取消最终结果统一以 `on_file_operation_result` 为准；调用返回 `IEC_STATUS_OK` 仅表示请求已被受理。
+- 若对端返回否定确认、传送原因异常、取消请求拒绝或厂商扩展错误，库应尽量填充 `iec_file_operation_result_t.cause_of_transmission`、`native_error_code` 和 `detail_message`，便于上层排障。
 - 终端 XML/msg 自描述文件获取使用通用文件传输接口实现：上层可先调用 `<prefix>_list_files` 定位模型文件，再调用 `<prefix>_read_file` 读取内容，并通过 `on_file_data_indication` 聚合文件数据、通过 `on_file_operation_result` 判断最终结果；SDK 不再提供单独的自描述文件获取接口。
 - 程序升级中的升级包内容写入应使用 `<prefix>_write_file`；升级控制接口只承载启动升级、文件升级结束和撤销升级命令。
 
@@ -898,15 +913,16 @@ typedef struct iec_raw_asdu_tx {
 
 | 类型 | 分类 | 作用 | 关键字段或取值 |
 | --- | --- | --- | --- |
-| `iec_file_operation_t` | 枚举 | 表达文件操作类型 | 目录召唤、读取、写入 |
+| `iec_file_operation_t` | 枚举 | 表达文件操作类型 | 目录召唤、读取、写入、写入取消 |
 | `iec_file_transfer_direction_t` | 枚举 | 表达文件传输方向 | 远端到本地、本地到远端 |
-| `iec_file_transfer_state_t` | 枚举 | 表达文件传输本地状态 | 已受理、传输中、已完成、失败 |
-| `iec_file_result_code_t` | 枚举 | 表达文件操作结果 | 已受理、完成、拒绝、否定确认、偏移不匹配、超时、协议错误、不存在、不支持 |
+| `iec_file_transfer_state_t` | 枚举 | 表达文件传输本地状态 | 已受理、传输中、已完成、失败、已取消 |
+| `iec_file_result_code_t` | 枚举 | 表达文件操作结果 | 已受理、完成、拒绝、否定确认、偏移不匹配、超时、协议错误、不存在、不支持、取消 |
 | `iec_file_list_request_t` | 结构体 | 表达目录召唤请求 | 公共地址、目录名、是否附带详情 |
 | `iec_file_entry_t` | 结构体 | 表达目录项 | 目录名、文件名、大小、修改时间、目录标志、只读标志、校验摘要 |
 | `iec_file_list_indication_t` | 结构体 | 表达目录召唤返回分片 | 请求 ID、公共地址、目录名、目录项数组、数量、完成标志 |
 | `iec_file_read_request_t` | 结构体 | 表达文件读取请求 | 公共地址、目录名、文件名、期望分块、已知总大小 |
 | `iec_file_write_request_t` | 结构体 | 表达文件写入请求 | 公共地址、目录名、文件名、起始偏移、总大小、内容窗口、建议分块、覆盖标志 |
+| `iec_file_write_cancel_request_t` | 结构体 | 表达写文件取消请求 | 公共地址、传输 ID、命令超时 |
 | `iec_file_data_indication_t` | 结构体 | 表达文件数据块返回 | 传输 ID、方向、文件定位、总大小、当前偏移、下个偏移、数据视图、完成标志 |
 | `iec_file_transfer_status_t` | 结构体 | 表达文件传输状态快照 | 传输 ID、方向、状态、文件定位、写文件已确认偏移、写文件续传标志、最近结果 |
 | `iec_file_operation_result_t` | 结构体 | 表达文件类操作最终或阶段结果 | 请求 ID、传输 ID、操作、方向、结果、文件定位、最终偏移、诊断信息 |
@@ -947,7 +963,8 @@ typedef struct iec_raw_asdu_tx {
 typedef enum iec_file_operation {
     IEC_FILE_OPERATION_LIST = 1,   /* 文件目录召唤 */
     IEC_FILE_OPERATION_READ = 2,   /* 文件读取 */
-    IEC_FILE_OPERATION_WRITE = 3   /* 文件写入 */
+    IEC_FILE_OPERATION_WRITE = 3,  /* 文件写入 */
+    IEC_FILE_OPERATION_CANCEL = 4   /* 取消写文件传输 */
 } iec_file_operation_t;
 
 typedef enum iec_file_transfer_direction {
@@ -959,7 +976,8 @@ typedef enum iec_file_transfer_state {
     IEC_FILE_TRANSFER_STATE_ACCEPTED = 1,  /* 请求已被受理 */
     IEC_FILE_TRANSFER_STATE_RUNNING = 2,   /* 正在传输 */
     IEC_FILE_TRANSFER_STATE_COMPLETED = 3, /* 已完成 */
-    IEC_FILE_TRANSFER_STATE_FAILED = 4     /* 传输失败 */
+    IEC_FILE_TRANSFER_STATE_FAILED = 4,    /* 传输失败 */
+    IEC_FILE_TRANSFER_STATE_CANCELED = 5   /* 传输已取消 */
 } iec_file_transfer_state_t;
 
 typedef enum iec_file_result_code {
@@ -971,7 +989,8 @@ typedef enum iec_file_result_code {
     IEC_FILE_RESULT_TIMEOUT = 6,           /* 文件请求超时 */
     IEC_FILE_RESULT_PROTOCOL_ERROR = 7,    /* 协议处理错误 */
     IEC_FILE_RESULT_NOT_FOUND = 8,         /* 目标文件不存在 */
-    IEC_FILE_RESULT_UNSUPPORTED = 9        /* 目标协议或终端不支持 */
+    IEC_FILE_RESULT_UNSUPPORTED = 9,       /* 目标协议或终端不支持 */
+    IEC_FILE_RESULT_CANCELED = 10          /* 写文件取消已被接受 */
 } iec_file_result_code_t;
 
 typedef struct iec_file_list_request {
@@ -1019,6 +1038,12 @@ typedef struct iec_file_write_request {
     uint8_t overwrite_existing;             /* 是否允许覆盖已有文件 */
 } iec_file_write_request_t;
 
+typedef struct iec_file_write_cancel_request {
+    uint16_t common_address;                /* 目标公共地址 */
+    uint32_t transfer_id;                   /* 待取消的写文件传输 ID */
+    uint32_t command_timeout_ms;            /* 取消命令确认超时 */
+} iec_file_write_cancel_request_t;
+
 typedef struct iec_file_data_indication {
     uint32_t transfer_id;                   /* 文件传输 ID */
     iec_file_transfer_direction_t direction; /* 传输方向 */
@@ -1051,7 +1076,7 @@ typedef struct iec_file_transfer_status {
 typedef struct iec_file_operation_result {
     uint32_t request_id;                    /* 与目录请求 ID 对应, 非目录时可为 0 */
     uint32_t transfer_id;                   /* 与传输 ID 对应, 非读写时可为 0 */
-    iec_file_operation_t operation;         /* 对应操作 */
+    iec_file_operation_t operation;         /* 对应操作, 包括写文件取消 */
     iec_file_transfer_direction_t direction; /* 传输方向, 非读写时可忽略 */
     iec_file_result_code_t result;          /* 结果码 */
     uint16_t common_address;                /* 目标公共地址 */
@@ -1254,6 +1279,7 @@ typedef struct iec_parameter_result {
 - 终端 XML/msg 自描述文件通过通用文件接口获取；目录召唤、文件读取、数据块聚合、写文件断点续传和最终结果判断均沿用 `iec_file_*` 类型，不再定义 `iec_device_description_*` 专用类型。
 - 文件读取通过 `on_file_data_indication` 返回数据块；`current_offset` 和 `next_offset` 仅用于文件拼接和进度显示，不作为读文件断点续传恢复点。
 - 写文件首次传输使用 `iec_file_write_request_t.start_offset = 0`；续传仍通过 `<prefix>_write_file` 重新提交写文件窗口。运维101写文件续传时，库通过 `0x87/0x88` 确认终端已接收偏移，实际恢复点以终端 `0x88` 响应的起始数据段号为准。
+- `iec_file_write_cancel_request_t` 只用于取消写文件方向的进行中传输；`transfer_id` 必须来自此前成功受理的 `<prefix>_write_file` 返回值，读文件方向不使用本请求。
 - 运维101文件传输场景下，单块数据窗口建议不超过 `1024` 字节；标准101场景下，单块数据窗口建议不超过 `255` 字节。
 - `iec_file_write_request_t.total_size` 描述远端目标文件总长度，`content_size` 描述本次待发送窗口长度；上层可一次性提供完整文件，也可在续传场景只提供剩余窗口。
 - `iec_file_operation_result_t.cause_of_transmission`、`native_error_code` 和 `detail_message` 用于承接否定确认、传送原因失败、偏移非法等诊断细节；`detail_message` 为空时，上层至少应结合 `result` 与 `cause_of_transmission` 做错误归因。
@@ -1286,7 +1312,7 @@ typedef struct iec_parameter_result {
 | `on_command_result` | `iec_on_command_result_fn` | 遥控或遥调命令出现确认、否认、超时或最终结果 | `iec_command_result_t` | 当前回调期间有效 |
 | `on_file_list_indication` | `iec_on_file_list_indication_fn` | 收到文件目录项分片 | `iec_file_list_indication_t` | 当前回调期间有效 |
 | `on_file_data_indication` | `iec_on_file_data_indication_fn` | 收到文件读取数据块 | `iec_file_data_indication_t` | 当前回调期间有效 |
-| `on_file_operation_result` | `iec_on_file_operation_result_fn` | 文件目录、读取或写入操作产生结果 | `iec_file_operation_result_t` | 当前回调期间有效 |
+| `on_file_operation_result` | `iec_on_file_operation_result_fn` | 文件目录、读取、写入或写文件取消操作产生结果 | `iec_file_operation_result_t` | 当前回调期间有效 |
 | `on_upgrade_result` | `iec_on_upgrade_result_fn` | 程序升级控制命令产生结果 | `iec_upgrade_result_t` | 当前回调期间有效 |
 | `on_clock_result` | `iec_on_clock_result_fn` | 校时或时钟读取完成 | `iec_clock_result_t` | 当前回调期间有效 |
 | `on_parameter_indication` | `iec_on_parameter_indication_fn` | 收到参数读取结果 | `iec_parameter_indication_t` | 当前回调期间有效 |
@@ -1429,7 +1455,7 @@ typedef void (*iec_on_file_data_indication_fn)(
  * @brief 文件类操作结果回调。
  *
  * @param[in] session      触发回调的会话句柄。
- * @param[in] result       文件目录或文件读写请求结果视图。
+ * @param[in] result       文件目录、文件读写或写文件取消请求结果视图。
  * @param[in] user_context 用户上下文，原样来自 `iec_session_config_t.user_context`。
  */
 typedef void (*iec_on_file_operation_result_fn)(
@@ -2414,7 +2440,7 @@ static void on_file_data_indication(
 
 ### 7.11 文件写入与断点续传流程
 
-以下流程以运维101库为例，展示如何向终端写入文件并按终端确认偏移续传。断点续传仅适用于写文件方向；`m101_get_file_transfer_status` 只用于状态展示和诊断，不作为续传偏移查询接口。
+以下流程以运维101库为例，展示如何向终端写入文件、按终端确认偏移续传，以及在业务需要时显式取消进行中的写传输。断点续传和取消都只适用于写文件方向；`m101_get_file_transfer_status` 只用于状态展示和诊断，不作为续传偏移查询接口。
 
 ```mermaid
 sequenceDiagram
@@ -2428,6 +2454,12 @@ sequenceDiagram
     库->>终端: 分块发送文件内容
     终端-->>库: 返回写入确认
     Note over 应用,库: 若需要续传, 重新提交覆盖续传位置的写文件窗口
+    Note over 应用,库: 若需要中止写传输, 调用 <prefix>_cancel_file_write
+    应用->>库: m101_cancel_file_write(session, cancel_req, &cancel_request_id)
+    库-->>应用: IEC_STATUS_OK + cancel_request_id
+    库->>终端: 取消写文件传输
+    终端-->>库: 取消确认/否认
+    库->>回调: on_file_operation_result(CANCEL, CANCELED/REJECTED/...)
     应用->>库: m101_write_file(session, start_offset=0, content=full_or_covering_window, &new_transfer_id)
     库->>终端: 0x87 写文件激活(续传)
     终端-->>库: 0x88 写文件激活确认(续传), 起始数据段号
@@ -2468,6 +2500,7 @@ m101_write_file(session, &write_req, &write_transfer_id);
 3. 调用方重新提交的 `start_offset`、`content` 和 `content_size` 应覆盖可能的续传位置；库按终端 `0x88` 返回偏移选择实际发送起点。不要修改目标文件名和总大小。
 4. 运维101文件写入场景下建议以 `1024` 字节作为单块发送窗口上限，超过部分由库自动拆分并推进偏移。
 5. 文件写入最终成功、失败、超时或否定确认都以 `on_file_operation_result` 为准。
+6. 若需主动停掉进行中的写传输，应显式调用 `<prefix>_cancel_file_write`，不要依赖链路超时替代取消。
 
 ### 7.12 程序升级流程
 
@@ -2897,7 +2930,7 @@ iec101_send_raw_asdu(session, &raw_req);
 - 运行期协议错误。
 - 命令应答结果。
 - 参数下发和定值区切换结果。
-- 文件目录召唤、文件读取和文件写入结果。
+- 文件目录召唤、文件读取、文件写入和写文件取消结果。
 - 程序升级控制命令确认、否认、超时和撤销结果。
 - 校时和时钟读取结果。
 - 状态自检码实时上送事件。
@@ -2908,7 +2941,7 @@ iec101_send_raw_asdu(session, &raw_req);
 - 同步返回 `IEC_STATUS_OK` 表示请求已进入处理流程，业务动作的完成情况通过后续回调体现。
 - 命令下发最终结果以 `on_command_result` 为准。
 - 参数下发和定值区切换最终结果以 `on_parameter_result` 为准。
-- 文件目录、文件读取和文件写入最终结果以 `on_file_operation_result` 为准；若出现协议否定确认、传送原因异常或厂商扩展错误，应优先读取其中的诊断字段。
+- 文件目录、文件读取、文件写入和写文件取消最终结果以 `on_file_operation_result` 为准；若出现协议否定确认、传送原因异常、取消请求拒绝或厂商扩展错误，应优先读取其中的诊断字段。
 - 程序升级控制结果以 `on_upgrade_result` 为准；升级包写入结果以 `on_file_operation_result` 为准。
 - 校时和时钟读取最终结果以 `on_clock_result` 为准。
 - 状态自检码实时上送以 `on_self_check_event` 为准；历史 `ulog` 文件读取结果仍以文件接口回调为准。
@@ -2920,7 +2953,7 @@ iec101_send_raw_asdu(session, &raw_req);
 - 变化遥测、变位遥信和周期上送仍属于点表主路径，不单独拆分专属回调；上层通过 `point_type`、`type_id`、`cause_of_transmission`、质量位和时标信息完成业务分流。
 - 状态自检码实时上送是独立高层事件，附录 C 的 `TI=42/COT=3` 报文不应被拆分为普通点表对象，也不应要求调用方只通过 `on_raw_asdu` 自行解析。
 - 参数接口是独立主路径，参数读取和参数下发不应通过点表接口或遥控接口拼装实现。
-- 文件接口是独立主路径，目录召唤、文件传输和写文件断点续传不应通过 `<prefix>_send_raw_asdu` 或自定义旁路报文暴露给上层。
+- 文件接口是独立主路径，目录召唤、文件传输、写文件取消和写文件断点续传不应通过 `<prefix>_send_raw_asdu` 或自定义旁路报文暴露给上层。
 - 程序升级控制接口是独立高层主路径，启动升级、文件升级结束和撤销升级不应通过 `<prefix>_send_raw_asdu` 拼装；升级包写入阶段应显式使用文件接口。
 - 时钟接口是独立主路径，校时和读取终端当前时间不应通过 `<prefix>_send_raw_asdu` 或参数接口拼装实现。
 - 原始 ASDU 旁路作为调试抓包、扩展报文观察和受控透传通道。
@@ -2931,7 +2964,7 @@ iec101_send_raw_asdu(session, &raw_req);
 ### 8.5 参数与文件接口边界
 
 - 动态库负责参数读取、参数下发、定值区切换以及协议字段与高层参数值对象之间的映射。
-- 动态库负责文件目录召唤、文件读取、文件写入、传输状态维护和写文件断点续传协议处理；运维101写文件续传偏移由库通过 `0x87/0x88` 与终端确认。终端 XML/msg 自描述文件获取也使用这组文件传输接口完成。
+- 动态库负责文件目录召唤、文件读取、文件写入、写文件取消、传输状态维护和写文件断点续传协议处理；运维101写文件续传偏移由库通过 `0x87/0x88` 与终端确认。终端 XML/msg 自描述文件获取也使用这组文件传输接口完成。
 - 动态库负责程序升级控制命令封装、确认/否认解析和升级控制结果回调；上层负责在升级控制结果和文件写入结果之间编排完整升级业务流程。
 - 动态库负责校时和读取终端当前时间的协议交互以及结果回调。
 - 参数模板文件的导入、导出、版本管理和落盘由上层应用负责，不纳入动态库职责范围。
